@@ -1,0 +1,11 @@
+* text=auto
+*.bat text eol=crlf
+*.c text eol=lf
+*.cpp text eol=lf
+*.h text eol=lf
+*.hpp text eol=lf
+*.lua text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.def text eol=crlf
+*.exe binary

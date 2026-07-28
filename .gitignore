@@ -1,0 +1,8 @@
+/build/
+/.vs/
+__pycache__/
+*.py[cod]
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
