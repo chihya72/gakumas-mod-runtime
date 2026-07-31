@@ -1,10 +1,12 @@
 # Gakumas 游戏内 Mod 管理器：完整规划
 
-> 文档状态：初版基线  
+> 文档状态：独立 DLL 注入修订
 > 建立日期：2026-08-01  
 > 目标平台：学园偶像大师 DMM Windows 版（Unity IL2CPP / x64）  
 > 项目仓库：`gakumas-in-game-mod-manager`  
 > 依赖运行库：相邻仓库 `..\gakumas-mod-runtime`
+> 注入方式：独立的 `gakumas_mod_manager.dll`，不使用 `gkms-localify-dmm` 注入
+> 现有代理：`version.dll` 与用户现有的 `xinput3.dll` 保持不动；源码 Runtime 当前产物名为 `xinput1_3.dll`，实际部署名在 M1 确认
 
 ## 1. 项目摘要
 
@@ -179,7 +181,7 @@ Mod 管理
 - 记录运行日志与资源加载历史；
 - 使用 UnityResolve 访问 IL2CPP 类与方法。
 
-现有汉化插件代码已经验证了以下游戏调用路径可行：
+历史研究中已经验证了以下游戏调用路径可行。这里的代码只作为签名调查参考，管理器不会加载、调用、修改或依赖汉化插件：
 
 - `MasterManager.get_CostumeMaster`；
 - `CostumeMaster.GetAllWithSortByKey`；
@@ -202,7 +204,8 @@ Runtime 当前公开接口只有 `Initialize()` 与 `Shutdown()`，而且 `enabl
 - 获取不可变快照的 API；
 - 修改 `enabled` 并安全写回的 API；
 - 稳定、带版本号的跨 DLL C ABI；
-- 加载并初始化管理器 DLL 的最小插件入口。
+- 让已加载的 Runtime 导出可供独立管理器读取的 API；
+- 记录 Runtime 与管理器的握手状态。
 
 Runtime 当前也没有可靠的反向恢复流程。已经被替换的 Unity 对象可能被多个场景或实例引用，因此第一版严格采用重启生效。
 
@@ -210,18 +213,18 @@ Runtime 当前也没有可靠的反向恢复流程。已经被替换的 Unity �
 
 ```text
 gakumas.exe
-└─ xinput1_3.dll（gakumas-mod-runtime）
-   ├─ 扫描全部 mod.json
-   ├─ 保存本次启动状态与下次启动配置
-   ├─ 注册并执行 AssetBundle 替换
-   ├─ 导出 Runtime API v1
-   ├─ 统一管理 MinHook 安装
-   └─ 加载 gakumas_mod_manager.dll
-      ├─ 通过 Runtime API 获取 Mod 快照
-      ├─ 通过 UnityResolve / RuntimeInvoke 访问游戏 UI 与 Master
-      ├─ 解析服装和发型目标
-      ├─ 复用游戏原生格子加载图标
-      └─ 通过 Runtime API 修改 enabled
+├─ version.dll（汉化插件，独立运行，不参与本项目）
+├─ xinput3.dll / xinput1_3.dll（现有 Mod Runtime 代理）
+│  ├─ 扫描全部 mod.json
+│  ├─ 保存本次启动状态与下次启动配置
+│  ├─ 注册并执行 AssetBundle 替换
+│  └─ 导出 Runtime API v1
+└─ gakumas_mod_manager.dll（本项目，独立注入）
+   ├─ 通过 Runtime API 获取 Mod 快照
+   ├─ 通过 UnityResolve / RuntimeInvoke 访问游戏 UI 与 Master
+   ├─ 解析服装和发型目标
+   ├─ 复用游戏原生格子加载图标
+   └─ 通过 Runtime API 修改 enabled
 ```
 
 ### 6.1 二进制边界
@@ -230,27 +233,54 @@ gakumas.exe
 
 ```text
 gakumas-local\plugins\mod-manager\gakumas_mod_manager.dll
+gakumas-local\plugins\mod-manager\GakumasModManager.Loader.exe（可选）
 ```
 
-由 Runtime 使用 `LoadLibraryW` 加载，并调用管理器导出的固定入口：
+`gakumas_mod_manager.dll` 是普通的 x64 DLL，不伪装成 `version.dll`、`xinput3.dll` 或 `xinput1_3.dll`。首选由独立 Loader 在游戏进程启动后注入；如果现有 Runtime 已提供安全的模块加载入口，也可以由 Runtime 代为加载，但这不是管理器的编译或运行时依赖。
+
+管理器 DLL 导出固定入口：
 
 ```cpp
 extern "C" __declspec(dllexport)
-bool GkmmInitialize(const GmrHostApiV1* host);
+bool GkmmInitialize();
 
 extern "C" __declspec(dllexport)
 void GkmmShutdown();
 ```
 
-管理器不是第二个代理 DLL，不占用 `version.dll`、`winhttp.dll` 等系统代理名称，也不要求安装汉化插件。
+注入后，管理器通过 `GetModuleHandleW` 在当前进程中查找现有 Runtime 的导出函数。候选模块名由部署配置提供，至少支持 `xinput3.dll` 和源码默认的 `xinput1_3.dll`。找不到 Runtime API 时，管理器记录原因并不显示入口，不自行伪造 Mod 状态。
 
-### 6.2 依赖原则
+管理器不占用 `version.dll`、`xinput3.dll`、`xinput1_3.dll` 等现有代理名称，也不要求安装汉化插件。
 
-- `gakumas-mod-runtime` 是 Mod 状态的唯一事实来源；
+### 6.2 独立注入流程
+
+首选流程：
+
+1. Loader 检查目标为 64 位 `gakumas.exe`；
+2. Loader 等待游戏进程和 `GameAssembly.dll` 出现；
+3. Loader 以与游戏相同的权限注入 `gakumas_mod_manager.dll`；
+4. DLL 的 `DllMain` 只创建工作线程，不执行 Unity 或文件扫描；
+5. 工作线程等待 Runtime API 和 `GameAssembly.dll` 就绪；
+6. 管理器完成签名检查后，等待主页 UI 创建并注入入口；
+7. 退出、进程结束或注入失败时，管理器清理自己的 Hook 和 UI 订阅。
+
+如果当前已有可信 DLL 注入器，可以直接使用它，不必构建本项目的 Loader。Loader 不是第一版业务功能；它的职责仅限于把新的管理器 DLL 放入游戏进程。
+
+现有 DLL 边界：
+
+- 不覆盖、不改名、不向 `version.dll` 写入管理器代码；汉化插件继续按原方式独立加载；
+- 不覆盖用户现有的 `xinput3.dll`；如果它就是 AssetBundle Runtime，则由它导出 Runtime API；
+- 源码仓库当前把 Runtime 目标命名为 `xinput1_3.dll`，实际游戏目录如果使用 `xinput3.dll`，必须在部署配置中明确映射，不能靠模糊匹配；
+- 如果 `xinput3.dll` 并不是 `gakumas-mod-runtime`，管理器不会把它当作 Runtime，也不会向其中注入代码；此时必须让真正的 Runtime 导出 API，或让 Loader 配置正确的 Runtime 模块名；
+- 新管理器只使用自己的文件名 `gakumas_mod_manager.dll`，并通过显式 DLL 注入进入进程。
+
+### 6.3 依赖原则
+
+- `gakumas-mod-runtime` 是 Mod 状态的唯一事实来源，但不负责管理器 UI 注入；
 - 管理器不能直接修改 Runtime 内部容器；
 - 管理器只通过版本化 C ABI 读写状态；
-- 管理器可以参考汉化插件的已验证签名，但不能在二进制上依赖汉化插件；
-- Runtime 统一提供 Hook 安装/移除服务，管理器不再静态链接第二份 MinHook；
+- `gkms-localify-dmm` 与本项目没有编译、加载、调用和 Hook 依赖；
+- 管理器拥有自己的 UI Hook 生命周期；它可以静态链接自己的 MinHook，但不得 Hook 汉化插件目标或 Runtime 资源 Hook；
 - 跨 DLL 不传 `std::string`、`std::vector`、异常或 Unity 对象；
 - Unity 对象只存在于管理器 UI 层，不能写入持久化目录或跨线程长期裸持有。
 
@@ -319,24 +349,27 @@ void GkmmShutdown();
 
 Mod 快照采用 UTF-8 JSON，而不是跨 DLL 传递 C++ 容器。Runtime 分配返回缓冲区，并提供配套释放函数，避免 CRT 堆边界问题。
 
-建议的 Host API：
+建议的 Runtime API：
 
 ```cpp
-struct GmrHostApiV1 {
+struct GmrRuntimeApiV1 {
     uint32_t structSize;
     uint32_t apiVersion;
 
     GmrResult (*getModsJson)(GmrOwnedBuffer* output);
     void (*freeBuffer)(void* data);
     GmrResult (*setModEnabled)(const char* modIdUtf8, bool enabled);
-
-    GmrResult (*installHook)(void* target, void* detour, void** original);
-    GmrResult (*removeHook)(void* target);
     void (*writeLog)(GmrLogLevel level, const char* component, const char* messageUtf8);
 };
 ```
 
-所有结构都包含尺寸或版本字段。新增字段只能追加，不能改变 v1 字段含义。
+Runtime 通过稳定导出函数提供该表，管理器在注入后从现有 `xinput3.dll` 或 `xinput1_3.dll` 取得：
+
+```cpp
+extern "C" GmrResult GmrGetRuntimeApiV1(GmrRuntimeApiV1* output);
+```
+
+所有结构都包含尺寸或版本字段。新增字段只能追加，不能改变 v1 字段含义。UI Hook 的安装、移除和生命周期完全由管理器自己的 DLL 负责，不通过汉化插件，也不要求 Runtime 把 UI Hook 暴露出来。
 
 ### 8.2 快照示例
 
@@ -704,8 +737,9 @@ gakumas-in-game-mod-manager\
 - Premake 5；
 - UTF-8 编译；
 - nlohmann/json 只用于 Runtime API 快照解析；
-- UnityResolve 使用与 Runtime/汉化插件兼容的固定版本；
-- 不在管理器 DLL 中重复引入 MinHook。
+- UnityResolve 使用与 Runtime ABI 兼容、版本固定的副本；
+- 管理器 DLL 自己管理 UI Hook，可静态链接自己的 MinHook；
+- 管理器不得与 Runtime 的资源 Hook 或汉化插件的 Hook 目标重叠。
 
 ## 17. 分阶段实施计划
 
@@ -744,8 +778,8 @@ gakumas-in-game-mod-manager\
 - 建立冲突、注册、应用和错误状态；
 - 实现 JSON 快照；
 - 实现原子 `enabled` 写入；
-- 实现版本化 Host API；
-- 实现管理器 DLL 加载与安全卸载；
+- 实现版本化 Runtime API 导出；
+- 实现独立管理器 DLL 的注入握手与安全卸载；
 - 补充并发保护和单元测试。
 
 退出条件：不依赖游戏 UI 的测试程序可以列出所有 Mod、切换 enabled，并验证重启前后状态语义。
@@ -855,7 +889,7 @@ gakumas-in-game-mod-manager\
 - 游戏被强制关闭后 Manifest 仍有效；
 - Runtime 存在但管理器 DLL 缺失；
 - 管理器存在但 Runtime API 版本不兼容；
-- 汉化插件安装与未安装两种环境。
+- 汉化插件已安装与未安装两种环境，确认二者互不依赖。
 
 ## 19. 第一版验收标准
 
@@ -885,7 +919,7 @@ gakumas-in-game-mod-manager\
 | hair 资源与 CostumeHead 不是一对一 | 发型名称或图标匹配错误 | 通过 hairAssetId、Costume 引用和官方格子三重验证 |
 | Runtime 只记录启用项 | 禁用 Mod 无法列出 | 新建完整目录模型，不再从 replacement map 反推 |
 | 热关闭后对象仍被引用 | 黑屏或崩溃 | 第一版只写配置，重启生效 |
-| 两个 DLL 各自管理 Hook | 卸载冲突 | Runtime 提供统一 Hook 服务，Manager 不链接 MinHook |
+| Runtime 与管理器各自管理 Hook | 卸载或目标冲突 | 明确 Hook 目标边界，管理器只负责 UI，Runtime 只负责资源替换 |
 | Manifest 写入中断 | Mod 配置损坏 | 同目录临时文件、Flush、原子替换 |
 | 玩家手动编辑 Manifest | 覆盖外部修改 | 时间戳/摘要检测，冲突时重新解析或拒绝写入 |
 | 技术信息污染界面 | 玩家难以理解 | Presentation Model 统一转换，原始字段仅异常兜底 |
@@ -924,4 +958,3 @@ gakumas-in-game-mod-manager\
 10. 再进入发布工作。
 
 该顺序优先消除最不确定的游戏 UI 和图标接入风险，避免先完成文件管理后才发现原生 UI 路径不可用。
-
