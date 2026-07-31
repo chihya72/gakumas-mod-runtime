@@ -1,0 +1,10 @@
+/build/
+/.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.pdb
+*.ilk
+*.log
+
