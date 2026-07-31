@@ -2,6 +2,7 @@
 
 #include "ModIl2cppUtils.hpp"
 #include "ModLog.hpp"
+#include "ModRuntimeCatalog.hpp"
 
 #include <Windows.h>
 #include <MinHook.h>
@@ -3150,6 +3151,8 @@ namespace GakumasMod::Runtime {
 
         const auto hooksOk = InstallHooks();
         LoadLocalModManifests();
+        Catalog::Refresh();
+        Catalog::SetReady(true);
         Log::InfoFmt("[ModAsset] Standalone mod plugin initialized. hooksOk=%d replacements=%zu",
             hooksOk ? 1 : 0,
             g_replacementMap.size());
@@ -3158,6 +3161,7 @@ namespace GakumasMod::Runtime {
 
     void Shutdown() {
         if (!g_initialized.exchange(false)) return;
+        Catalog::Clear();
         for (const auto target : g_hookTargets) {
             MH_DisableHook(target);
         }
