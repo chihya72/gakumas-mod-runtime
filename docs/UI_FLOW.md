@@ -1,13 +1,12 @@
 # M1：独立 DLL 注入与 UI 探针流程
 
-M1 的探针只验证注入、Runtime 握手和原生 UI 生命周期，不连接完整 Mod 列表。
+M1 的探针只验证入口加载、Runtime 握手和原生 UI 生命周期，不连接完整 Mod 列表。
 
 ```text
-外部 Loader
+UnityPlayer.dll
   │
-  ├─ 检查 gakumas.exe 为 x64
-  ├─ 等待 GameAssembly.dll
-  └─ 注入 gakumas_mod_manager.dll
+  ├─ 导入 WINHTTP.dll
+  └─ 加载游戏目录中的 winhttp.dll
        │
        ├─ DllMain：只创建工作线程
        ├─ 查找 xinput1_3.dll（部署别名可为 xinput3.dll）
@@ -20,6 +19,7 @@ M1 的探针只验证注入、Runtime 握手和原生 UI 生命周期，不连�
 ## 探针验收
 
 - 汉化插件是否安装，不影响管理器 DLL 的加载与卸载；
+- `UnityPlayer.dll` 的 `WINHTTP.dll` 导入能成功加载 `winhttp.dll`；
 - `version.dll` 不被替换、不被加载为管理器依赖；
 - `xinput1_3.dll` 与部署别名 `xinput3.dll` 的映射可配置；
 - Runtime API 不存在时，管理器只写日志，不显示入口；

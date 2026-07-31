@@ -5,7 +5,7 @@
 > 目标平台：学园偶像大师 DMM Windows 版（Unity IL2CPP / x64）  
 > 项目仓库：`gakumas-in-game-mod-manager`  
 > 依赖运行库：相邻仓库 `..\gakumas-mod-runtime`
-> 注入方式：独立的 `gakumas_mod_manager.dll`，不使用 `gkms-localify-dmm` 注入
+> 入口方式：独立的 `winhttp.dll` 入口，不使用 `gkms-localify-dmm` 注入
 > 现有代理：`version.dll` 与用户现有的 `xinput3.dll` 保持不动；源码 Runtime 当前产物名为 `xinput1_3.dll`，实际部署名在 M1 确认
 
 ## 1. 项目摘要
@@ -219,7 +219,7 @@ gakumas.exe
 │  ├─ 保存本次启动状态与下次启动配置
 │  ├─ 注册并执行 AssetBundle 替换
 │  └─ 导出 Runtime API v1
-└─ gakumas_mod_manager.dll（本项目，独立注入）
+└─ winhttp.dll（本项目，UnityPlayer 已导入的独立入口）
    ├─ 通过 Runtime API 获取 Mod 快照
    ├─ 通过 UnityResolve / RuntimeInvoke 访问游戏 UI 与 Master
    ├─ 解析服装和发型目标
@@ -232,11 +232,10 @@ gakumas.exe
 推荐产物：
 
 ```text
-gakumas-local\plugins\mod-manager\gakumas_mod_manager.dll
-gakumas-local\plugins\mod-manager\GakumasModManager.Loader.exe（可选）
+游戏根目录\winhttp.dll
 ```
 
-`gakumas_mod_manager.dll` 是普通的 x64 DLL，不伪装成 `version.dll`、`xinput3.dll` 或 `xinput1_3.dll`。首选由独立 Loader 在游戏进程启动后注入；如果现有 Runtime 已提供安全的模块加载入口，也可以由 Runtime 代为加载，但这不是管理器的编译或运行时依赖。
+`winhttp.dll` 是普通的 x64 WinHTTP 代理 DLL。目标游戏的 `UnityPlayer.dll` 静态导入了 `WINHTTP.dll`，因此 Windows 会在游戏目录优先加载它。它只转发 UnityPlayer 当前使用的 WinHTTP 导出，再启动管理器工作线程；不占用 `version.dll`，不占用 `xinput1_3.dll`，也不由 Runtime 链式加载。
 
 管理器 DLL 导出固定入口：
 
@@ -248,23 +247,21 @@ extern "C" __declspec(dllexport)
 void GkmmShutdown();
 ```
 
-注入后，管理器通过 `GetModuleHandleW` 在当前进程中查找现有 Runtime 的导出函数。候选模块名由部署配置提供，至少支持 `xinput3.dll` 和源码默认的 `xinput1_3.dll`。找不到 Runtime API 时，管理器记录原因并不显示入口，不自行伪造 Mod 状态。
+加载后，管理器通过 `GetModuleHandleW` 在当前进程中查找现有 Runtime 的导出函数。候选模块名由部署配置提供，至少支持 `xinput3.dll` 和源码默认的 `xinput1_3.dll`。找不到 Runtime API 时，管理器记录原因并不显示入口，不自行伪造 Mod 状态。
 
-管理器不占用 `version.dll`、`xinput3.dll`、`xinput1_3.dll` 等现有代理名称，也不要求安装汉化插件。
+管理器入口固定为 `winhttp.dll`，不占用 `version.dll`、`xinput3.dll`、`xinput1_3.dll`，也不要求安装汉化插件。
 
-### 6.2 独立注入流程
+### 6.2 独立入口加载流程
 
 首选流程：
 
-1. Loader 检查目标为 64 位 `gakumas.exe`；
-2. Loader 等待游戏进程和 `GameAssembly.dll` 出现；
-3. Loader 以与游戏相同的权限注入 `gakumas_mod_manager.dll`；
-4. DLL 的 `DllMain` 只创建工作线程，不执行 Unity 或文件扫描；
-5. 工作线程等待 Runtime API 和 `GameAssembly.dll` 就绪；
-6. 管理器完成签名检查后，等待主页 UI 创建并注入入口；
-7. 退出、进程结束或注入失败时，管理器清理自己的 Hook 和 UI 订阅。
+1. Windows 加载 `UnityPlayer.dll` 时，根据其导入表加载游戏目录中的 `winhttp.dll`；
+2. `winhttp.dll` 的 `DllMain` 只创建工作线程，不执行 Unity 或文件扫描；
+3. 工作线程等待 Runtime API 和 `GameAssembly.dll` 就绪；
+4. 管理器完成签名检查后，等待主页 UI 创建并注入入口；
+5. 退出、进程结束或加载失败时，管理器清理自己的 Hook 和 UI 订阅。
 
-如果当前已有可信 DLL 注入器，可以直接使用它，不必构建本项目的 Loader。Loader 不是第一版业务功能；它的职责仅限于把新的管理器 DLL 放入游戏进程。
+本项目不需要额外 Loader，也不需要外部 DLL 注入器；入口由 `UnityPlayer.dll` 的 `WINHTTP.dll` 导入关系触发。
 
 现有 DLL 边界：
 
@@ -272,7 +269,7 @@ void GkmmShutdown();
 - 不覆盖用户现有的 `xinput3.dll`；如果它就是 AssetBundle Runtime，则由它导出 Runtime API；
 - 源码仓库当前把 Runtime 目标命名为 `xinput1_3.dll`，实际游戏目录如果使用 `xinput3.dll`，必须在部署配置中明确映射，不能靠模糊匹配；
 - 如果 `xinput3.dll` 并不是 `gakumas-mod-runtime`，管理器不会把它当作 Runtime，也不会向其中注入代码；此时必须让真正的 Runtime 导出 API，或让 Loader 配置正确的 Runtime 模块名；
-- 新管理器只使用自己的文件名 `gakumas_mod_manager.dll`，并通过显式 DLL 注入进入进程。
+- 新管理器只使用自己的文件名 `winhttp.dll`，由 UnityPlayer 的导入关系自动进入进程。
 
 ### 6.3 依赖原则
 
@@ -759,7 +756,7 @@ gakumas-in-game-mod-manager\
 
 已完成：
 
-- `gakumas_mod_manager.dll` 独立 DLL 工程；
+- `winhttp.dll` 独立 DLL 工程，并转发 UnityPlayer 使用的 WinHTTP API；
 - 不依赖 `version.dll` 或汉化插件的 Runtime 握手探针；
 - 同时尝试 `xinput1_3.dll` 与部署别名 `xinput3.dll`；
 - `SIGNATURE_MATRIX.md` 和 `UI_FLOW.md`；

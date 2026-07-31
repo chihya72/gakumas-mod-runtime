@@ -31,8 +31,8 @@ workspace "gakumas_in_game_mod_manager"
 
     filter {}
 
-    project "gakumas_mod_manager"
-        targetname "gakumas_mod_manager"
+    project "winhttp_manager"
+        targetname "winhttp"
         language "C++"
         kind "SharedLib"
 
