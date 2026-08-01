@@ -7,4 +7,5 @@
 *.pdb
 *.ilk
 *.log
-
+__pycache__/
+*.pyc

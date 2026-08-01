@@ -42,8 +42,18 @@ workspace "gakumas_in_game_mod_manager"
             "./src/PluginMain.cpp",
             "./src/RuntimeClient.cpp",
             "./src/XInputProxy.cpp",
+            "./src/CampusUiProbe.cpp",
             "./src/xinput9_1_0.def",
         }
         includedirs {
             "./include",
+            "../gakumas-mod-runtime/deps/minhook/include",
+        }
+
+        libdirs {
+            "../gakumas-mod-runtime/build/bin/%{cfg.platform}/%{cfg.buildcfg}",
+        }
+
+        links {
+            "minhook",
         }
