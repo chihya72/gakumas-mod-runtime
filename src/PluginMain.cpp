@@ -35,12 +35,12 @@ namespace {
         std::thread(BootstrapThread).detach();
     }
 }
-extern "C" __declspec(dllexport) bool GkmmInitialize() {
+extern "C" bool GkmmInitialize() {
     StartBootstrap();
     return true;
 }
 
-extern "C" __declspec(dllexport) void GkmmShutdown() {
+extern "C" void GkmmShutdown() {
     g_stop.store(true);
 }
 

@@ -31,8 +31,8 @@ workspace "gakumas_in_game_mod_manager"
 
     filter {}
 
-    project "dwmapi_manager"
-        targetname "dwmapi"
+    project "xinput1_4_manager"
+        targetname "xinput1_4"
         language "C++"
         kind "SharedLib"
 
@@ -40,6 +40,7 @@ workspace "gakumas_in_game_mod_manager"
             "./include/**.hpp",
             "./include/**.h",
             "./src/**.cpp",
+            "./src/**.def",
         }
         includedirs {
             "./include",
