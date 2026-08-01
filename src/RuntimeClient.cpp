@@ -39,7 +39,7 @@ namespace GakumasModManager {
         if (!connected_ || !api_.getModsJson || !api_.freeBuffer) return false;
         GmrOwnedBuffer buffer{};
         const auto result = api_.getModsJson(&buffer);
-        if (result == GMR_OK && buffer.data) api_.freeBuffer(buffer.data);
+        if (buffer.data) api_.freeBuffer(buffer.data);
         return result == GMR_OK;
     }
 
@@ -48,7 +48,11 @@ namespace GakumasModManager {
         if (!connected_ || !api_.getModsJson || !api_.freeBuffer) return false;
 
         GmrOwnedBuffer buffer{};
-        if (api_.getModsJson(&buffer) != GMR_OK) return false;
+        const auto result = api_.getModsJson(&buffer);
+        if (result != GMR_OK) {
+            if (buffer.data) api_.freeBuffer(buffer.data);
+            return false;
+        }
         if (!buffer.data && buffer.size != 0) return false;
 
         if (buffer.data && buffer.size != 0) {
