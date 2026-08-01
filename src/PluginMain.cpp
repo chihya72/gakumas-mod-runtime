@@ -56,7 +56,7 @@ namespace {
 
     void BootstrapThread() {
         using namespace std::chrono_literals;
-        DebugLog("xinput1_4.dll loaded; manager bootstrap thread started.");
+        DebugLog("xinput9_1_0.dll loaded; manager bootstrap thread started.");
         GakumasModManager::RuntimeClient runtime;
         for (int attempt = 0; attempt < 600 && !g_stop.load(); ++attempt) {
             if (runtime.Connect() && runtime.IsReady()) {
