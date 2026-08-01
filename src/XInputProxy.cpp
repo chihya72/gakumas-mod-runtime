@@ -30,7 +30,7 @@ namespace {
             if (length == 0 || length >= MAX_PATH) return static_cast<HMODULE>(nullptr);
 
             std::wstring path(systemDirectory, length);
-            path += L"\\xinput1_4.dll";
+            path += L"\\xinput9_1_0.dll";
             return LoadLibraryW(path.c_str());
         }();
         return module;

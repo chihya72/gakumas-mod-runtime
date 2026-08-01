@@ -5,8 +5,8 @@ M1 的探针只验证入口加载、Runtime 握手和原生 UI 生命周期，�
 ```text
 UnityPlayer.dll
   │
-  ├─ 查找 UnityPlayer 内的 XInput 动态候选
-  └─ 加载游戏目录中的 xinput1_4.dll
+  ├─ 加载游戏根目录的 d3d11.dll
+  └─ 根据导入表加载 xinput9_1_0.dll
        │
        ├─ DllMain：只创建工作线程
        ├─ 查找 xinput1_3.dll（部署别名可为 xinput3.dll）
@@ -19,7 +19,7 @@ UnityPlayer.dll
 ## 探针验收
 
 - 汉化插件是否安装，不影响管理器 DLL 的加载与卸载；
-- `UnityPlayer.dll` 的 XInput 动态加载能成功加载 `xinput1_4.dll`；
+- `d3d11.dll` 的导入关系能成功加载 `xinput9_1_0.dll`；
 - `version.dll` 不被替换、不被加载为管理器依赖；
 - `xinput1_3.dll` 与部署别名 `xinput3.dll` 的映射可配置；
 - Runtime API 不存在时，管理器只写日志，不显示入口；

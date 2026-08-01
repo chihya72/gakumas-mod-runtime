@@ -1,0 +1,7 @@
+EXPORTS
+    XInputGetCapabilities @2
+    XInputGetDSoundAudioDeviceGuids @3
+    XInputGetState @4
+    XInputSetState @5
+    GkmmInitialize @101
+    GkmmShutdown @102

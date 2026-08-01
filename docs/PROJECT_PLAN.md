@@ -5,7 +5,7 @@
 > 目标平台：学园偶像大师 DMM Windows 版（Unity IL2CPP / x64）  
 > 项目仓库：`gakumas-in-game-mod-manager`  
 > 依赖运行库：相邻仓库 `..\gakumas-mod-runtime`
-> 入口方式：独立的 `xinput1_4.dll` 入口，不使用 `gkms-localify-dmm` 注入
+> 入口方式：独立的 `xinput9_1_0.dll` 入口，不使用 `gkms-localify-dmm` 注入
 > 现有代理：`version.dll` 与用户现有的 `xinput3.dll` 保持不动；源码 Runtime 当前产物名为 `xinput1_3.dll`，实际部署名在 M1 确认
 
 ## 1. 项目摘要
@@ -219,7 +219,7 @@ gakumas.exe
 │  ├─ 保存本次启动状态与下次启动配置
 │  ├─ 注册并执行 AssetBundle 替换
 │  └─ 导出 Runtime API v1
-└─ xinput1_4.dll（本项目，UnityPlayer 的 XInput 动态候选入口）
+└─ xinput9_1_0.dll（本项目，d3d11.dll 的独立 XInput 依赖入口）
    ├─ 通过 Runtime API 获取 Mod 快照
    ├─ 通过 UnityResolve / RuntimeInvoke 访问游戏 UI 与 Master
    ├─ 解析服装和发型目标
@@ -232,10 +232,10 @@ gakumas.exe
 推荐产物：
 
 ```text
-游戏根目录\xinput1_4.dll
+游戏根目录\xinput9_1_0.dll
 ```
 
-`xinput1_4.dll` 是普通的 x64 XInput 代理 DLL。`UnityPlayer.dll` 内包含 `xinput1_3.dll`、`xinput1_4.dll`、`xinput9_1_0.dll` 的动态加载候选字符串；管理器使用其中尚未部署的 `xinput1_4.dll`，转发系统 XInput 1.4 导出后启动管理器工作线程。不占用汉化的 `version.dll`，不占用 Mod Runtime 的 `xinput1_3.dll`，也不由 Runtime 链式加载。
+`xinput9_1_0.dll` 是普通的 x64 XInput 代理 DLL。游戏根目录的 `d3d11.dll` 静态导入 `xinput9_1_0.dll` 的 XInput 1.0 导出，因此 Windows 加载图形模块时会自动加载它。管理器转发系统 XInput 9.1.0 的 4 个导出后启动工作线程。不占用汉化的 `version.dll`，不占用 Mod Runtime 的 `xinput1_3.dll`，也不由 Runtime 链式加载。
 
 管理器 DLL 导出固定入口：
 
@@ -249,7 +249,7 @@ void GkmmShutdown();
 
 加载后，管理器通过 `GetModuleHandleW` 在当前进程中查找现有 Runtime 的导出函数。候选模块名由部署配置提供，至少支持 `xinput3.dll` 和源码默认的 `xinput1_3.dll`。找不到 Runtime API 时，管理器记录原因并不显示入口，不自行伪造 Mod 状态。
 
-管理器入口固定为 `xinput1_4.dll`，不占用 `version.dll`、`xinput3.dll`、`xinput1_3.dll`，也不要求安装汉化插件。
+管理器入口固定为 `xinput9_1_0.dll`，不占用 `version.dll`、`xinput3.dll`、`xinput1_3.dll`，也不要求安装汉化插件。
 
 入口加载、Runtime 握手和停止状态写入 `gakumas-local\mod-manager.log`；日志同时使用 `OutputDebugStringA` 输出，便于用 DebugView 观察。
 
@@ -257,13 +257,13 @@ void GkmmShutdown();
 
 首选流程：
 
-1. Unity 初始化输入模块时尝试加载 `xinput1_4.dll`；
-2. `xinput1_4.dll` 的 `DllMain` 只创建工作线程，不执行 Unity 或文件扫描；
+1. Windows 加载游戏根目录的 `d3d11.dll` 时，根据其导入表加载 `xinput9_1_0.dll`；
+2. `xinput9_1_0.dll` 的 `DllMain` 只创建工作线程，不执行 Unity 或文件扫描；
 3. 工作线程等待 Runtime API 和 `GameAssembly.dll` 就绪；
 4. 管理器完成签名检查后，等待主页 UI 创建并注入入口；
 5. 退出、进程结束或加载失败时，管理器清理自己的 Hook 和 UI 订阅。
 
-本项目不需要额外 Loader，也不需要外部 DLL 注入器；入口由 UnityPlayer 的 XInput 动态加载逻辑触发。
+本项目不需要额外 Loader，也不需要外部 DLL 注入器；入口由 `d3d11.dll` 的导入关系触发。
 
 现有 DLL 边界：
 
@@ -271,7 +271,7 @@ void GkmmShutdown();
 - 不覆盖用户现有的 `xinput3.dll`；如果它就是 AssetBundle Runtime，则由它导出 Runtime API；
 - 源码仓库当前把 Runtime 目标命名为 `xinput1_3.dll`，实际游戏目录如果使用 `xinput3.dll`，必须在部署配置中明确映射，不能靠模糊匹配；
 - 如果 `xinput3.dll` 并不是 `gakumas-mod-runtime`，管理器不会把它当作 Runtime，也不会向其中注入代码；此时必须让真正的 Runtime 导出 API，或让 Loader 配置正确的 Runtime 模块名；
-- 新管理器只使用自己的文件名 `xinput1_4.dll`，由 UnityPlayer 的 XInput 动态加载逻辑自动进入进程。
+- 新管理器只使用自己的文件名 `xinput9_1_0.dll`，由 `d3d11.dll` 的导入关系自动进入进程。
 
 ### 6.3 依赖原则
 
@@ -758,7 +758,7 @@ gakumas-in-game-mod-manager\
 
 已完成：
 
-- `xinput1_4.dll` 独立 DLL 工程，并转发系统 XInput 1.4 API；
+- `xinput9_1_0.dll` 独立 DLL 工程，并转发系统 XInput 9.1.0 API；
 - 不依赖 `version.dll` 或汉化插件的 Runtime 握手探针；
 - 同时尝试 `xinput1_3.dll` 与部署别名 `xinput3.dll`；
 - `SIGNATURE_MATRIX.md` 和 `UI_FLOW.md`；

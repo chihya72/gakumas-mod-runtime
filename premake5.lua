@@ -31,8 +31,8 @@ workspace "gakumas_in_game_mod_manager"
 
     filter {}
 
-    project "xinput1_4_manager"
-        targetname "xinput1_4"
+    project "xinput9_1_0_manager"
+        targetname "xinput9_1_0"
         language "C++"
         kind "SharedLib"
 
