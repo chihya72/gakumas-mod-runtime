@@ -15,6 +15,8 @@
 - 在原始 `SkinnedMeshRenderer` 上替换克隆后的 Mesh；
 - 按骨骼名重排 skinning 数据，失败时保留原始 Mesh；
 - 按 renderer、材质槽和 shader property 替换贴图；
+- 为贴图覆盖创建私有材质，并在游戏更新 `MaterialPropertyBlock` 或 `Material.SetTexture`
+  时按材质槽持续合并；
 - 写入 `gakumas-local/mod-plugin.log`；
 - 输出 source profile，并提供离线 Validator 与 Author Doctor。
 
@@ -65,4 +67,5 @@ python tools\gakumas_mod_doctor.py <mod-dir> --profile <source-profile.json>
 python -m unittest discover -s tests -v
 ```
 
-完整验收还应重新生成 Release DLL，并核对 `xinput1_3.def` 的 8 个导出。
+完整验收还应重新生成 Release DLL，并核对 `xinput1_3.def` 的 8 个导出。PropertyBlock
+持久覆盖目前有源码契约测试，但仍需要在目标游戏版本进行暗色/正常光照实机验证。

@@ -1,6 +1,6 @@
 # 当前状态与路线
 
-## 已实现
+## 已实现或已加入源码
 
 - XInput 代理入口与独立日志；
 - manifest v2 基础字段和优先级冲突处理；
@@ -16,9 +16,20 @@
 - `UnityEngine.AssetBundle::LoadAsset_Internal(System.String,System.Type)`；
 - `UnityEngine.AssetBundle::LoadAssetAsync_Internal(System.String,System.Type)`；
 - `UnityEngine.AssetBundleRequest::GetResult()`；
-- `UnityEngine.AssetBundleRequest::get_asset()`。
+- `UnityEngine.AssetBundleRequest::get_asset()`；
+- `UnityEngine.Renderer::SetPropertyBlock(MaterialPropertyBlock)`；
+- `UnityEngine.Renderer::SetPropertyBlock(MaterialPropertyBlock,int)`；
+- `UnityEngine.Material::SetTexture(int/string,Texture)`。
 
 当前不安装 `AssetBundleRequest::get_allAssets()` hook。
+
+没有安装 `Object::Internal_CloneSingle`、`Internal_CloneSingleWithParent`、
+`Internal_InstantiateSingle` 或 `Internal_InstantiateSingleWithParent` hook。它们曾在实验版
+中出现，后来确认不应放在每次 Instantiate 的热路径上，已于 2026-07-30 回退。原因和证据见
+[`../AB_DARK_RENDERING_INVESTIGATION.md`](../AB_DARK_RENDERING_INVESTIGATION.md)。
+
+PropertyBlock/Material 持久覆盖代码已经编译并通过源码契约测试，但“暗色场景完全消除异常”
+仍不是当前文档可宣称的实机结论。
 
 ## 优先任务
 

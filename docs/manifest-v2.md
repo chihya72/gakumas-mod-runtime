@@ -72,3 +72,7 @@ gakumas-local/local-files/mods/<mod-id>/mod.json
 
 一个 bundle 可以包含多个部位，但每个 prefab/FBX 只对应一个部位；各部位使用独立 replacement。
 runtime 可以重排已存在骨骼的 skinning 数据，但不会自动修权重、创建 Animator 驱动或转换材质。
+
+> 管理器第一版的产品约束更窄：一个 Mod Manifest 只显示一个逻辑目标（一个 `body` 服装
+> 或一个 `hair` 发型）。Runtime 仍按兼容性保留 `replacements[]` 数组并逐项解析；如果
+> 管理器发现多条 replacement，必须将该 Mod 标记为配置异常，不在玩家界面展开成多件服装。
