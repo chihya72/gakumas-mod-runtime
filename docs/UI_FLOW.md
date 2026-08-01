@@ -7,6 +7,7 @@ M1 的探针只验证入口加载、Runtime 握手和原生 UI 生命周期，�
 - 已验证游戏加载独立入口 `xinput9_1_0.dll`；
 - 已验证管理器从 `xinput1_3.dll` 获取并调用 `GmrGetRuntimeApiV1`；
 - 已在目标游戏日志中看到 `M1 probe connected to Runtime API v1`；
+- 已部署一次性 Campus 原生 Sheet 探针：在 Unity 主线程定位 `HomeTopScreenPresenter`，通过 `RuntimeInvoke` 调用 `OpenNoticeSheetAsync`；
 - 原生主页菜单、Sheet/Screen 和服装/发型 Cell 尚未接入。
 
 ```text
@@ -41,6 +42,12 @@ UnityPlayer.dll
 - 独立入口加载；
 - Runtime API v1 握手；
 - 管理器与汉化插件无加载依赖。
+
+待实机验证：
+
+- `Campus.OutGame.HomeTopScreenPresenter` 实例查找；
+- `OpenNoticeSheetAsync` 的 RuntimeInvoke 调用；
+- 原生 Sheet 能否在管理器自己的生命周期中安全打开和关闭。
 
 ## 备注
 

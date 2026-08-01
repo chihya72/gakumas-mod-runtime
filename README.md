@@ -18,6 +18,7 @@
 - 独立管理器成功找到 `xinput1_3.dll` 导出的 `GmrGetRuntimeApiV1`；
 - Runtime API v1 握手成功；
 - 管理器与汉化插件保持独立；
+- 已加入一次性 Campus 原生 Sheet UI 探针，验证 `HomeTopScreenPresenter.OpenNoticeSheetAsync`；
 - 当前仍未接入主页菜单、原生服装/发型列表或可见 UI。
 
 - [x] 建立独立本地 Git 仓库

@@ -44,4 +44,13 @@ workspace "gakumas_in_game_mod_manager"
         }
         includedirs {
             "./include",
+            "../gakumas-mod-runtime/deps/minhook/include",
+        }
+
+        libdirs {
+            "../gakumas-mod-runtime/build/bin/%{cfg.platform}/%{cfg.buildcfg}",
+        }
+
+        links {
+            "minhook",
         }

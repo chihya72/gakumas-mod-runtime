@@ -1,4 +1,6 @@
 #include "gkmm/RuntimeClient.hpp"
+#include "gkmm/CampusUiProbe.hpp"
+#include "gkmm/ManagerLog.hpp"
 
 #include <Windows.h>
 
@@ -72,6 +74,7 @@ namespace {
                 else {
                     DebugLog("M2 Runtime snapshot request failed; UI entry remains disabled.");
                 }
+                GakumasModManager::StartCampusUiProbe();
                 return;
             }
             if (attempt == 0 || attempt % 100 == 0) {
@@ -93,6 +96,13 @@ namespace {
         std::thread(BootstrapThread).detach();
     }
 }
+
+namespace GakumasModManager {
+    void Log(const char* message) {
+        DebugLog(message);
+    }
+}
+
 extern "C" bool GkmmInitialize() {
     StartBootstrap();
     return true;

@@ -754,7 +754,7 @@ gakumas-in-game-mod-manager\
 
 ### M1：签名调查与最小 UI 探针
 
-当前状态：入口加载和 Runtime API 握手已在目标游戏启动日志中验证；主页菜单、Sheet、服装 Cell 和发型 Cell 的最终方法签名仍未确认，空白 UI 尚未注入。
+当前状态：入口加载和 Runtime API 握手已在目标游戏启动日志中验证；已加入一次性原生 Sheet 探针，下一次启动验证 `HomeTopScreenPresenter.OpenNoticeSheetAsync`。主页菜单、服装 Cell 和发型 Cell 的最终方法签名仍未确认，管理器自己的入口尚未注入。
 
 已完成：
 
@@ -765,6 +765,7 @@ gakumas-in-game-mod-manager\
 - Release x64 DLL 编译验证。
 - 目标游戏加载 `xinput9_1_0.dll` 的实机日志验证；
 - 通过部署的 `xinput1_3.dll` 成功取得并调用 Runtime API v1。
+- 编译并部署 Campus 原生 Sheet UI 探针；
 
 任务：
 
@@ -777,7 +778,7 @@ gakumas-in-game-mod-manager\
 - 验证发型原生 Cell；
 - 截图记录不同分辨率结果。
 
-当前结论：M1 的 DLL 加载和 Runtime 握手子目标已完成；UI 接入子目标仍未完成。
+当前结论：M1 的 DLL 加载和 Runtime 握手子目标已完成；当前正在验证 Campus 原生 Sheet 调用，管理器自己的 UI 接入仍未完成。
 
 退出条件：不接 Mod 数据时，空管理页面已能稳定打开、关闭且不破坏原游戏导航。
 
