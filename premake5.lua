@@ -37,20 +37,13 @@ workspace "gakumas_in_game_mod_manager"
         kind "SharedLib"
 
         files {
-            "./include/**.hpp",
-            "./include/**.h",
-            "./src/**.cpp",
-            "./src/**.def",
+            "./include/gkmm/RuntimeClient.hpp",
+            "./include/gkmm/gmr_runtime_api.h",
+            "./src/PluginMain.cpp",
+            "./src/RuntimeClient.cpp",
+            "./src/XInputProxy.cpp",
+            "./src/xinput9_1_0.def",
         }
         includedirs {
             "./include",
-            "../gakumas-mod-runtime/deps/minhook/include",
-        }
-
-        libdirs {
-            "../gakumas-mod-runtime/build/bin/%{cfg.platform}/%{cfg.buildcfg}",
-        }
-
-        links {
-            "minhook",
         }

@@ -74,7 +74,6 @@ namespace {
                 else {
                     DebugLog("M2 Runtime snapshot request failed; UI entry remains disabled.");
                 }
-                GakumasModManager::StartCampusUiProbe();
                 return;
             }
             if (attempt == 0 || attempt % 100 == 0) {
