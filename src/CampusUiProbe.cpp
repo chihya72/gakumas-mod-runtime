@@ -19,6 +19,7 @@ namespace GakumasModManager {
         std::atomic<bool> g_started{false};
         std::atomic<bool> g_probeFinished{false};
         std::atomic<std::uint32_t> g_frameCounter{0};
+        std::atomic<bool> g_loggedPresenterReady{false};
         UnityResolve::Method* g_deltaTimeMethod{};
         DeltaTimeFn g_deltaTimeOriginal{};
 
@@ -49,8 +50,18 @@ namespace GakumasModManager {
                 return false;
             }
 
+            if (!g_loggedPresenterReady.exchange(true)) {
+                Log("Campus UI probe: HomeTopScreenPresenter and OpenNoticeSheetAsync resolved; waiting for an active instance.");
+            }
+
             const auto presenters = presenterClass->FindObjectsByType<void*>();
-            if (presenters.empty()) return false;
+            if (presenters.empty()) {
+                const auto frame = g_frameCounter.load();
+                if ((frame % 300) == 0) {
+                    Log("Campus UI probe: no active HomeTopScreenPresenter instance yet.");
+                }
+                return false;
+            }
 
             for (const auto presenter : presenters) {
                 if (!presenter) continue;
@@ -71,8 +82,10 @@ namespace GakumasModManager {
 
             const auto frame = g_frameCounter.fetch_add(1) + 1;
             if ((frame % 30) == 0) TryOpenNoticeSheet();
-            if (frame >= 1800 && !g_probeFinished.exchange(true)) {
-                Log("Campus UI probe: home presenter was not found within 60 seconds.");
+            // A cold login can take longer than a few seconds. At 60 FPS this
+            // allows roughly ten minutes while still preventing a permanent hook.
+            if (frame >= 36000 && !g_probeFinished.exchange(true)) {
+                Log("Campus UI probe: home presenter was not found within the probe timeout.");
                 DisableProbeHook();
             }
             return result;
