@@ -1,6 +1,7 @@
 # Gakumas 游戏内 Mod 管理器：完整规划
 
-> 文档状态：M1 入口与 Runtime 握手已实机验证，M2 数据通路进行中
+> 文档状态：M1 DLL/API 已验证；菜单入口曾在旧构建中注入成功，但当前构建回归，页面尚未验收；M2 数据通路进行中
+> 当前状态与已废弃做法见 `UI_FLOW.md`；调查数据源见 `RESEARCH_SOURCES.md`
 > 建立日期：2026-08-01  
 > 目标平台：学园偶像大师 DMM Windows 版（Unity IL2CPP / x64）  
 > 项目仓库：`gakumas-in-game-mod-manager`  
@@ -27,7 +28,8 @@
 以下内容视为第一版的固定要求，不再作为开放问题：
 
 - 一个 Mod 只能对应一个逻辑目标：一件服装或一个发型；
-- Manifest 技术上可以包含多条 `replacements[]`，但这些记录必须全部指向同一逻辑目标、同一类别；
+- 管理器第一版要求一个 Manifest 只提供一条逻辑 `replacement`；同一条记录可以包含多个
+  renderer、材质槽或贴图规则，但不能借此表达多件服装或多个发型；
 - `body` Mod 放入“服装”分页，`hair` Mod 放入“发型”分页；
 - 管理入口只在游戏 Master 数据已经加载的主页阶段出现，因此不设计 Master 未加载占位流程；
 - 目标解析失败时，使用 Manifest 原始 `source` 作为文字兜底，单个异常项不能阻断整个页面；
@@ -430,14 +432,16 @@ extern "C" GmrResult GmrGetRuntimeApiV1(GmrRuntimeApiV1* output);
 
 ### 9.1 一个 Mod 一个目标
 
-不能简单要求 `replacements[]` 数组长度等于 1，因为同一个逻辑目标未来可能需要多条底层资源规则。正确约束是：
+`replacements[]` 是 Runtime v2 为兼容底层规则保留的数组，但管理器第一版不把它展开为多
+个玩家项目。一个 Manifest 只接受一条逻辑 replacement；一条 replacement 内可以有多个
+renderer、材质槽和贴图规则。多条 replacement 或多个逻辑目标的 Manifest 标记为配置异常，
+不拆成多件服装/发型显示。正确约束是：
 
-1. 每条 replacement 必须能归类为 `body` 或 `hair`；
-2. 所有 replacement 必须属于同一个类别；
-3. 所有 replacement 解析出的逻辑目标键必须相同；
-4. 不允许同时包含服装和发型；
-5. `face` 在第一版中判定为不支持；
-6. 任一条无法确认目标时，整个 Mod 标记为目标配置异常，不部分展示成多个项目。
+1. 唯一 replacement 必须能归类为 `body` 或 `hair`；
+2. 它只能解析出一个逻辑目标键；
+3. 不允许同时包含服装和发型；
+4. `face` 在第一版中判定为不支持；
+5. replacement 缺失、重复或无法确认目标时，整个 Mod 标记为目标配置异常，不部分展示。
 
 ### 9.2 服装目标解析
 
@@ -754,7 +758,7 @@ gakumas-in-game-mod-manager\
 
 ### M1：签名调查与最小 UI 探针
 
-当前状态：入口加载和 Runtime API 握手已在目标游戏启动日志中验证；Campus 原生 Sheet 探针已完成实验，但因主线程安全性未确认而默认禁用。主页菜单、服装 Cell 和发型 Cell 的最终方法签名仍未确认，管理器自己的入口尚未注入。
+当前状态：入口加载和 Runtime API 握手已在目标游戏启动日志中验证。菜单生命周期 Hook、按钮模板克隆和文字替换曾在 11:23 的构建中得到日志证据；11:37 的最新构建出现 `_commonView`、`_subButtons` 和 `_button` 解析值为 0，未再次注入入口，因此 M1 UI 仍未完成。旧版原生 Sheet 调用已废弃，当前代码只保留自建面板实验路径。
 
 已完成：
 
@@ -765,26 +769,25 @@ gakumas-in-game-mod-manager\
 - Release x64 DLL 编译验证。
 - 目标游戏加载 `xinput9_1_0.dll` 的实机日志验证；
 - 通过部署的 `xinput1_3.dll` 成功取得并调用 Runtime API v1。
-- 编译并部署 Campus 原生 Sheet UI 探针实验版；已因崩溃风险回滚并禁用自动调用；
+- 编译并部署菜单入口/自建面板实验版；旧版 `OpenNoticeSheetAsync` 探针已因崩溃风险废弃；
 
 任务：
 
-- 建立 `SIGNATURE_MATRIX.md`；
-- 确认主页菜单入口；
-- 确认 Screen/Sheet 创建方式；
-- 注入仅含标题和关闭按钮的空页面；
+- 修复当前构建的字段解析回归并重新验证主页菜单入口；
+- 验证自建面板的创建、显示、关闭和重复进入；
 - 验证重复进入主页、返回、重登和退出；
 - 验证服装原生 Cell；
 - 验证发型原生 Cell；
 - 截图记录不同分辨率结果。
 
-当前结论：M1 的 DLL 加载和 Runtime 握手子目标已完成；Campus 原生 Sheet 直接调用在当前线程调度方案下不安全，管理器自己的 UI 接入仍未完成。
+当前结论：M1 的 DLL 加载和 Runtime 握手已完成；菜单入口只在旧构建中验证过，当前构建仍需修复；原生 Sheet 直接调用不再作为实现路线。
 
 退出条件：不接 Mod 数据时，空管理页面已能稳定打开、关闭且不破坏原游戏导航。
 
 ### M2：Runtime 目录与 API v1
 
-当前状态：Runtime 目录、启停写回、API v1 导出和 Manager 握手已完成实机验证；管理器侧的快照读取、统计日志和共享 SDK 整理仍待完成。`appliedThisSession` 仍需接入真实 AssetBundle 应用成功记录。
+当前状态：Runtime 目录、启停写回、API v1 导出、Manager 握手和一次快照读取已完成实机验证；
+正式列表绑定、统计展示和共享 SDK 整理仍待完成。`appliedThisSession` 仍需接入真实 AssetBundle 应用成功记录。
 
 已完成：
 
@@ -811,7 +814,8 @@ gakumas-in-game-mod-manager\
 - 实现独立管理器 DLL 的注入握手与安全卸载；
 - 补充并发保护和单元测试。
 
-下一步：让管理器在握手成功后读取一次 Mod 快照，并把数量、分类和异常计数写入日志，作为 UI 接入前的数据通路验收。
+下一步：保留握手后的 Runtime Mod 快照读取作为数据通路基线；先修复菜单字段解析回归，
+再验证入口和自建面板，最后把快照绑定到正式列表。
 
 退出条件：不依赖游戏 UI 的测试程序可以列出所有 Mod、切换 enabled，并验证重启前后状态语义。
 
@@ -876,7 +880,7 @@ gakumas-in-game-mod-manager\
 - 有效启用 body Mod；
 - 有效禁用 body Mod；
 - 有效 hair Mod；
-- 一个 Manifest 多条 replacement 但同一逻辑目标；
+- 一个 Manifest 含多条 replacement，即使指向同一逻辑目标，也判定为管理器配置异常；
 - 一个 Manifest 指向两个服装，判定异常；
 - 一个 Manifest 同时包含 body 与 hair，判定异常；
 - `face` 判定为不支持；
