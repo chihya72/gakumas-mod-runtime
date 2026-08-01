@@ -61,6 +61,17 @@ namespace {
         for (int attempt = 0; attempt < 600 && !g_stop.load(); ++attempt) {
             if (runtime.Connect() && runtime.IsReady()) {
                 DebugLog("M1 probe connected to Runtime API v1; UI hook is intentionally disabled.");
+                std::string snapshot;
+                if (runtime.GetModsJson(snapshot)) {
+                    char message[256]{};
+                    std::snprintf(message, sizeof(message),
+                        "M2 Runtime snapshot acquired (%zu bytes); JSON parsing/UI binding is pending.",
+                        snapshot.size());
+                    DebugLog(message);
+                }
+                else {
+                    DebugLog("M2 Runtime snapshot request failed; UI entry remains disabled.");
+                }
                 return;
             }
             if (attempt == 0 || attempt % 100 == 0) {

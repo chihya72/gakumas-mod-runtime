@@ -2,6 +2,13 @@
 
 M1 的探针只验证入口加载、Runtime 握手和原生 UI 生命周期，不连接完整 Mod 列表。
 
+## 当前进度（2026-08-01）
+
+- 已验证游戏加载独立入口 `xinput9_1_0.dll`；
+- 已验证管理器从 `xinput1_3.dll` 获取并调用 `GmrGetRuntimeApiV1`；
+- 已在目标游戏日志中看到 `M1 probe connected to Runtime API v1`；
+- 原生主页菜单、Sheet/Screen 和服装/发型 Cell 尚未接入。
+
 ```text
 UnityPlayer.dll
   │
@@ -28,6 +35,12 @@ UnityPlayer.dll
 - 关闭空白页面不会留下按钮事件或对象引用；
 - 管理器 DLL 卸载时移除自己的 Hook；
 - Runtime 的 AssetBundle 替换在探针失败时仍能工作。
+
+已实机通过：
+
+- 独立入口加载；
+- Runtime API v1 握手；
+- 管理器与汉化插件无加载依赖。
 
 ## 备注
 

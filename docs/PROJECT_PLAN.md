@@ -1,6 +1,6 @@
 # Gakumas 游戏内 Mod 管理器：完整规划
 
-> 文档状态：M1/M2 初步执行基线
+> 文档状态：M1 入口与 Runtime 握手已实机验证，M2 数据通路进行中
 > 建立日期：2026-08-01  
 > 目标平台：学园偶像大师 DMM Windows 版（Unity IL2CPP / x64）  
 > 项目仓库：`gakumas-in-game-mod-manager`  
@@ -754,7 +754,7 @@ gakumas-in-game-mod-manager\
 
 ### M1：签名调查与最小 UI 探针
 
-当前状态：部分完成。已建立独立管理器 DLL、Runtime API 握手客户端、注入流程文档和签名矩阵；尚未在目标游戏进程中确认主页菜单、Sheet、服装 Cell 和发型 Cell 的最终方法签名。
+当前状态：入口加载和 Runtime API 握手已在目标游戏启动日志中验证；主页菜单、Sheet、服装 Cell 和发型 Cell 的最终方法签名仍未确认，空白 UI 尚未注入。
 
 已完成：
 
@@ -763,6 +763,8 @@ gakumas-in-game-mod-manager\
 - 同时尝试 `xinput1_3.dll` 与部署别名 `xinput3.dll`；
 - `SIGNATURE_MATRIX.md` 和 `UI_FLOW.md`；
 - Release x64 DLL 编译验证。
+- 目标游戏加载 `xinput9_1_0.dll` 的实机日志验证；
+- 通过部署的 `xinput1_3.dll` 成功取得并调用 Runtime API v1。
 
 任务：
 
@@ -775,11 +777,13 @@ gakumas-in-game-mod-manager\
 - 验证发型原生 Cell；
 - 截图记录不同分辨率结果。
 
+当前结论：M1 的 DLL 加载和 Runtime 握手子目标已完成；UI 接入子目标仍未完成。
+
 退出条件：不接 Mod 数据时，空管理页面已能稳定打开、关闭且不破坏原游戏导航。
 
 ### M2：Runtime 目录与 API v1
 
-当前状态：初步完成。Runtime 已提供目录快照、单目标校验、冲突摘要、原子 `enabled` 写回和 `GmrGetRuntimeApiV1` 导出；`appliedThisSession` 仍需接入真实 AssetBundle 应用成功记录，Runtime/Manager API 头文件也需要改为单一共享来源。
+当前状态：Runtime 目录、启停写回、API v1 导出和 Manager 握手已完成实机验证；管理器侧的快照读取、统计日志和共享 SDK 整理仍待完成。`appliedThisSession` 仍需接入真实 AssetBundle 应用成功记录。
 
 已完成：
 
@@ -791,6 +795,8 @@ gakumas-in-game-mod-manager\
 - 原子 `enabled` 写回和外部修改检测；
 - Runtime Release 构建与导出检查；
 - Runtime catalog smoke test。
+- 游戏目录部署版 `xinput1_3.dll` 导出检查；
+- 管理器在目标游戏中成功完成 API v1 握手。
 
 在 `gakumas-mod-runtime` 中完成：
 
@@ -803,6 +809,8 @@ gakumas-in-game-mod-manager\
 - 实现版本化 Runtime API 导出；
 - 实现独立管理器 DLL 的注入握手与安全卸载；
 - 补充并发保护和单元测试。
+
+下一步：让管理器在握手成功后读取一次 Mod 快照，并把数量、分类和异常计数写入日志，作为 UI 接入前的数据通路验收。
 
 退出条件：不依赖游戏 UI 的测试程序可以列出所有 Mod、切换 enabled，并验证重启前后状态语义。
 
@@ -968,13 +976,14 @@ gakumas-in-game-mod-manager\
 
 规划确认后严格按以下顺序继续：
 
-1. 在目标游戏进程中验证主页菜单和 Sheet/Screen 签名；
-2. 验证服装 Cell；
-3. 验证发型 Cell；
-4. 将 Runtime/Manager API 头文件整理为单一共享 SDK；
-5. 接入真实 Runtime 快照并完成 UI 分页；
-6. 将 `appliedThisSession` 接入真实资源应用记录；
-7. 补齐异常与兼容测试；
-8. 再进入发布工作。
+1. 在管理器握手成功后读取一次 Runtime Mod 快照并记录统计；
+2. 在目标游戏进程中验证主页菜单和 Sheet/Screen 签名；
+3. 验证服装 Cell；
+4. 验证发型 Cell；
+5. 将 Runtime/Manager API 头文件整理为单一共享 SDK；
+6. 接入真实 Runtime 快照并完成 UI 分页；
+7. 将 `appliedThisSession` 接入真实资源应用记录；
+8. 补齐异常与兼容测试；
+9. 再进入发布工作。
 
 该顺序优先消除最不确定的游戏 UI 和图标接入风险，避免先完成文件管理后才发现原生 UI 路径不可用。

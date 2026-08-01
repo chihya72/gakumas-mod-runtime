@@ -43,6 +43,21 @@ namespace GakumasModManager {
         return result == GMR_OK;
     }
 
+    bool RuntimeClient::GetModsJson(std::string& output) const {
+        output.clear();
+        if (!connected_ || !api_.getModsJson || !api_.freeBuffer) return false;
+
+        GmrOwnedBuffer buffer{};
+        if (api_.getModsJson(&buffer) != GMR_OK) return false;
+        if (!buffer.data && buffer.size != 0) return false;
+
+        if (buffer.data && buffer.size != 0) {
+            output.assign(static_cast<const char*>(buffer.data), buffer.size);
+        }
+        if (buffer.data) api_.freeBuffer(buffer.data);
+        return true;
+    }
+
     const GmrRuntimeApiV1* RuntimeClient::Api() const {
         return connected_ ? &api_ : nullptr;
     }
