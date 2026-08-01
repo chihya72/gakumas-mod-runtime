@@ -251,6 +251,8 @@ void GkmmShutdown();
 
 管理器入口固定为 `xinput1_4.dll`，不占用 `version.dll`、`xinput3.dll`、`xinput1_3.dll`，也不要求安装汉化插件。
 
+入口加载、Runtime 握手和停止状态写入 `gakumas-local\mod-manager.log`；日志同时使用 `OutputDebugStringA` 输出，便于用 DebugView 观察。
+
 ### 6.2 独立入口加载流程
 
 首选流程：

@@ -8,6 +8,8 @@
 
 入口选择与导出转发证据见 [`docs/ENTRY_DLL_EVIDENCE.md`](docs/ENTRY_DLL_EVIDENCE.md)。
 
+管理器启动日志写入游戏目录的 `gakumas-local\mod-manager.log`，同时发送到调试器输出。
+
 ## 当前阶段
 
 - [x] 建立独立本地 Git 仓库
