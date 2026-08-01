@@ -31,8 +31,8 @@ workspace "gakumas_in_game_mod_manager"
 
     filter {}
 
-    project "winhttp_manager"
-        targetname "winhttp"
+    project "dwmapi_manager"
+        targetname "dwmapi"
         language "C++"
         kind "SharedLib"
 

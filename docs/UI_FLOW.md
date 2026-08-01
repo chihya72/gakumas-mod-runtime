@@ -5,8 +5,8 @@ M1 的探针只验证入口加载、Runtime 握手和原生 UI 生命周期，�
 ```text
 UnityPlayer.dll
   │
-  ├─ 导入 WINHTTP.dll
-  └─ 加载游戏目录中的 winhttp.dll
+  ├─ 导入 dwmapi.dll
+  └─ 加载游戏目录中的 dwmapi.dll
        │
        ├─ DllMain：只创建工作线程
        ├─ 查找 xinput1_3.dll（部署别名可为 xinput3.dll）
@@ -19,7 +19,7 @@ UnityPlayer.dll
 ## 探针验收
 
 - 汉化插件是否安装，不影响管理器 DLL 的加载与卸载；
-- `UnityPlayer.dll` 的 `WINHTTP.dll` 导入能成功加载 `winhttp.dll`；
+- `UnityPlayer.dll` 的 `dwmapi.dll` 导入能成功加载 `dwmapi.dll`；
 - `version.dll` 不被替换、不被加载为管理器依赖；
 - `xinput1_3.dll` 与部署别名 `xinput3.dll` 的映射可配置；
 - Runtime API 不存在时，管理器只写日志，不显示入口；
