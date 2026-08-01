@@ -1,13 +1,13 @@
 # Gakumas 游戏内 Mod 管理器：完整规划
 
-> 文档状态：M1 DLL/API 已验证；菜单入口曾在旧构建中注入成功，但当前构建回归，页面尚未验收；M2 数据通路进行中
+> 文档状态：M1 独立 DLL、Runtime 握手、主页入口和最小可见文本面板已实机验证；正式管理容器与 M3 列表仍待实现
 > 当前状态与已废弃做法见 `UI_FLOW.md`；调查数据源见 `RESEARCH_SOURCES.md`
 > 建立日期：2026-08-01  
 > 目标平台：学园偶像大师 DMM Windows 版（Unity IL2CPP / x64）  
 > 项目仓库：`gakumas-in-game-mod-manager`  
 > 依赖运行库：相邻仓库 `..\gakumas-mod-runtime`
 > 入口方式：独立的 `xinput9_1_0.dll` 入口，不使用 `gkms-localify-dmm` 注入
-> 现有代理：`version.dll` 与用户现有的 `xinput3.dll` 保持不动；源码 Runtime 当前产物名为 `xinput1_3.dll`，实际部署名在 M1 确认
+> 现有入口：`version.dll` 为独立汉化插件，`xinput1_3.dll` 为 Mod Runtime，二者均保持独立；本管理器已确认使用第三个入口名 `xinput9_1_0.dll`
 
 ## 1. 项目摘要
 
@@ -193,21 +193,25 @@ Mod 管理
 - `Costume.get_CostumeColorGroupId`；
 - `PhotographyCostumeSettingListItemModel` 相关路径。
 
-### 5.2 必须补齐的缺口
+### 5.2 当前已经补齐的 Runtime 能力
 
-Runtime 当前公开接口只有 `Initialize()` 与 `Shutdown()`，而且 `enabled: false` 的 Manifest 会被直接跳过。为了支持管理器，Runtime 需要增加：
+相邻 `gakumas-mod-runtime` 仓库已经为管理器补齐：
 
 - 独立于 replacement map 的完整 Mod 目录；
-- 禁用 Mod 的只读记录；
-- Manifest 校验结果；
-- 本次启动注册状态；
-- 实际资源应用状态或失败状态；
-- 冲突结果；
-- 获取不可变快照的 API；
-- 修改 `enabled` 并安全写回的 API；
-- 稳定、带版本号的跨 DLL C ABI；
-- 让已加载的 Runtime 导出可供独立管理器读取的 API；
-- 记录 Runtime 与管理器的握手状态。
+- 禁用 Mod、Manifest 异常、冲突和本次启动注册状态；
+- 不可变 UTF-8 JSON 快照；
+- 原子修改顶层 `enabled` 的 API；
+- 带结构尺寸和版本号的 Runtime API v1 C ABI；
+- `GmrGetRuntimeApiV1` 导出和跨 DLL 缓冲区释放函数；
+- Runtime 与管理器握手日志。
+
+2026-08-01 的目标游戏日志已确认管理器读取到 1451 字节快照，并在最小面板显示三条
+Mod 名称、类别和状态。当前剩余缺口是：
+
+- `appliedThisSession` 与真实 AssetBundle 应用成功记录的完整对应；
+- Manager/Runtime 共享头文件的单一来源整理；
+- 正式 Presentation Model、分栏、图标和开关绑定；
+- 页面打开时刷新，而不是只在 UI 探针启动时构建文本。
 
 Runtime 当前也没有可靠的反向恢复流程。已经被替换的 Unity 对象可能被多个场景或实例引用，因此第一版严格采用重启生效。
 
@@ -216,7 +220,7 @@ Runtime 当前也没有可靠的反向恢复流程。已经被替换的 Unity �
 ```text
 gakumas.exe
 ├─ version.dll（汉化插件，独立运行，不参与本项目）
-├─ xinput3.dll / xinput1_3.dll（现有 Mod Runtime 代理）
+├─ xinput1_3.dll（现有 Mod Runtime 代理）
 │  ├─ 扫描全部 mod.json
 │  ├─ 保存本次启动状态与下次启动配置
 │  ├─ 注册并执行 AssetBundle 替换
@@ -249,9 +253,11 @@ extern "C" __declspec(dllexport)
 void GkmmShutdown();
 ```
 
-加载后，管理器通过 `GetModuleHandleW` 在当前进程中查找现有 Runtime 的导出函数。候选模块名由部署配置提供，至少支持 `xinput3.dll` 和源码默认的 `xinput1_3.dll`。找不到 Runtime API 时，管理器记录原因并不显示入口，不自行伪造 Mod 状态。
+加载后，管理器通过 `GetModuleHandleW(L"xinput1_3.dll")` 在当前进程中查找现有 Runtime 的导出函数。找不到 Runtime API 时，管理器记录原因并不显示入口，不自行伪造 Mod 状态。
 
-管理器入口固定为 `xinput9_1_0.dll`，不占用 `version.dll`、`xinput3.dll`、`xinput1_3.dll`，也不要求安装汉化插件。
+管理器入口固定为 `xinput9_1_0.dll`，不占用 `version.dll` 或 `xinput1_3.dll`，也不要求安装汉化插件。
+
+当前 `RuntimeClient.cpp` 仍含历史口误产生的 `xinput3.dll` 兜底候选。它不是受支持的部署名，也没有参与本次成功握手；后续清理应删除该候选，只保留 `xinput1_3.dll`。
 
 入口加载、Runtime 握手和停止状态写入 `gakumas-local\mod-manager.log`；日志同时使用 `OutputDebugStringA` 输出，便于用 DebugView 观察。
 
@@ -270,9 +276,8 @@ void GkmmShutdown();
 现有 DLL 边界：
 
 - 不覆盖、不改名、不向 `version.dll` 写入管理器代码；汉化插件继续按原方式独立加载；
-- 不覆盖用户现有的 `xinput3.dll`；如果它就是 AssetBundle Runtime，则由它导出 Runtime API；
-- 源码仓库当前把 Runtime 目标命名为 `xinput1_3.dll`，实际游戏目录如果使用 `xinput3.dll`，必须在部署配置中明确映射，不能靠模糊匹配；
-- 如果 `xinput3.dll` 并不是 `gakumas-mod-runtime`，管理器不会把它当作 Runtime，也不会向其中注入代码；此时必须让真正的 Runtime 导出 API，或让 Loader 配置正确的 Runtime 模块名；
+- 不覆盖、不改名、不向 `xinput1_3.dll` 写入管理器代码；它继续作为唯一受支持的 Mod Runtime 模块并导出 Runtime API；
+- 不为 Runtime 引入部署别名或模糊匹配；管理器只接受已经验证的 `xinput1_3.dll`；
 - 新管理器只使用自己的文件名 `xinput9_1_0.dll`，由 `d3d11.dll` 的导入关系自动进入进程。
 
 ### 6.3 依赖原则
@@ -364,7 +369,7 @@ struct GmrRuntimeApiV1 {
 };
 ```
 
-Runtime 通过稳定导出函数提供该表，管理器在注入后从现有 `xinput3.dll` 或 `xinput1_3.dll` 取得：
+Runtime 通过稳定导出函数提供该表，管理器在注入后从现有 `xinput1_3.dll` 取得：
 
 ```cpp
 extern "C" GmrResult GmrGetRuntimeApiV1(GmrRuntimeApiV1* output);
@@ -565,20 +570,24 @@ Character.Id -> Character 显示信息
 
 不在第一版引入 ImGui 覆盖层。ImGui 会产生输入、缩放、视觉一致性和移动端式界面适配问题，也无法自然复用官方服装格子。
 
+当前 M1 已验证的自建面板是放大的 `MenuSubButtonView`，只用于证明入口、点击、Runtime
+快照和 RectTransform 调用链。它与原菜单内容重叠，不是本节所要求的最终页面。
+
 ### 11.2 接入调查顺序
 
-1. 确认主页菜单对应的 Screen、Presenter 和 View；
-2. 找到一个生命周期稳定的菜单创建或绑定方法；
-3. 验证注入一个无业务按钮后，返回、重登和重复进主页不会重复创建；
-4. 验证 `ScreenLayerManager` 的 Sheet/Screen 打开方式；
-5. 验证官方服装列表 Cell 的 Model/View/Presenter 绑定；
-6. 验证发型格子的绑定；
-7. 最后才接 Runtime 数据和开关写入。
+1. **已完成：**确认 `OutGameMenuPresenter`、`MenuPresenter.SetEvent` 和 `MenuView`；
+2. **已完成：**克隆副按钮并通过 `CampusButtonBase.OnClicked` 识别自定义入口；
+3. **已完成：**创建可见文本面板并显示 Runtime 快照；
+4. 验证返回主页、重登和重复进入不会重复创建；
+5. 选择正式独立容器，完成关闭/返回和页面层级；
+6. 验证官方服装列表 Cell 的 Model/View/Presenter 绑定；
+7. 验证发型格子的绑定；
+8. 接 Presentation Model、分页、刷新和开关写入。
 
 ### 11.3 UI 生命周期
 
 - 主菜单首次创建时注入入口，并用实例标记防止重复注入；
-- 打开管理器时拉取一次 Runtime 快照；
+- 当前探针在启动时构建一次快照文本；正式页面必须改为每次打开时拉取 Runtime 快照；
 - 在游戏主线程解析 Master、创建和绑定 Unity 对象；
 - 关闭页面时释放管理器持有的事件订阅、GCHandle 和临时列表；
 - 返回标题或登出时清空 Master 索引；
@@ -669,24 +678,27 @@ AssetBundle 是懒加载的，因此“本次尚未请求目标资源”不等�
 - DLL 入口不执行复杂逻辑；
 - 初始化在 Runtime 工作线程完成；
 - 所有导出函数检查结构尺寸、空指针和版本；
-- 管理器 Hook 由 Runtime 统一登记并在 Shutdown 移除；
-- UI Hook 必须先调用或按验证顺序调用原函数，不能吞掉游戏异常路径；
+- 管理器独立登记自己的 UI Hook，Runtime 不负责管理这些 Hook；
+- 原游戏对象的 Hook 默认保持原调用链；唯一例外是自定义入口克隆自 ClearCache 模板，
+  插件识别到自己的 `CampusButton` 后必须消费点击，不能继续触发模板原行为；
 - 未识别版本默认关闭功能，而不是强行调用猜测签名。
 
 ## 15. 日志与诊断
 
-复用 Runtime 日志文件，组件前缀使用：
+管理器使用独立日志文件：
 
 ```text
-[ModManager.RuntimeClient]
-[ModManager.TargetResolver]
-[ModManager.UI]
-[ModManager.Persistence]
+D:\Games\gakumas\gakumas-local\mod-manager.log
 ```
+
+当前统一前缀为 `[GakumasModManager]`，同时输出到 `OutputDebugStringA`。进入正式模块化后可在
+消息正文增加 `RuntimeClient`、`TargetResolver`、`UI` 和 `Persistence` 子标签，不再新建
+第二份日志。
 
 必须记录：
 
 - 管理器版本、Runtime API 版本与游戏版本；
+- PID、进程名和 DLL 实例加载时间，用于区分启动链中的多组加载记录；
 - 关键签名验证结果；
 - 扫描到的 Mod 数量及服装/发型/异常计数；
 - 目标解析成功或失败原因；
@@ -697,40 +709,41 @@ AssetBundle 是懒加载的，因此“本次尚未请求目标资源”不等�
 
 普通日志不输出完整 JSON。开发构建可提供受控的诊断快照，但 Release 默认关闭。
 
-## 16. 新仓库规划结构
+## 16. 仓库结构
 
-当前阶段只建立规划文档。进入实现后采用：
+当前已经进入实现阶段，实际结构为：
 
 ```text
 gakumas-in-game-mod-manager\
 ├─ README.md
 ├─ docs\
+│  ├─ ENTRY_DLL_EVIDENCE.md
 │  ├─ PROJECT_PLAN.md
+│  ├─ RESEARCH_SOURCES.md
 │  ├─ SIGNATURE_MATRIX.md
-│  ├─ UI_FLOW.md
-│  └─ TEST_MATRIX.md
+│  └─ UI_FLOW.md
 ├─ include\
 │  └─ gkmm\
-│     └─ PluginApi.hpp
+│     ├─ CampusUiProbe.hpp
+│     ├─ gmr_runtime_api.h
+│     ├─ ManagerLog.hpp
+│     └─ RuntimeClient.hpp
 ├─ src\
+│  ├─ CampusUiProbe.cpp
+│  ├─ ManagerLog.cpp
 │  ├─ PluginMain.cpp
 │  ├─ RuntimeClient.cpp
-│  ├─ RuntimeClient.hpp
-│  ├─ TargetResolver.cpp
-│  ├─ TargetResolver.hpp
-│  ├─ GameUiBridge.cpp
-│  ├─ GameUiBridge.hpp
-│  ├─ ManagerPresenter.cpp
-│  ├─ ManagerPresenter.hpp
-│  ├─ ManagerModel.cpp
-│  └─ ManagerModel.hpp
-├─ tests\
-│  ├─ fixtures\
-│  └─ unit\
-├─ deps\
+│  ├─ XInputProxy.cpp
+│  └─ xinput9_1_0.def
+├─ tools\
+│  ├─ inspector_index.py
+│  └─ metadata_index.py
 ├─ premake5.lua
 └─ .gitignore
 ```
+
+`TargetResolver`、正式 `GameUiBridge`、Presentation Model 和单元测试仍是下一阶段要拆出的
+模块，不应继续把所有业务堆进 `CampusUiProbe.cpp`。
 
 技术选型与现有 Runtime 对齐：
 
@@ -746,7 +759,7 @@ gakumas-in-game-mod-manager\
 
 ## 17. 分阶段实施计划
 
-### M0：规划基线（当前阶段）
+### M0：规划基线
 
 交付：
 
@@ -758,36 +771,42 @@ gakumas-in-game-mod-manager\
 
 ### M1：签名调查与最小 UI 探针
 
-当前状态：入口加载和 Runtime API 握手已在目标游戏启动日志中验证。菜单生命周期 Hook、按钮模板克隆和文字替换曾在 11:23 的构建中得到日志证据；11:37 的最新构建出现 `_commonView`、`_subButtons` 和 `_button` 解析值为 0，未再次注入入口，因此 M1 UI 仍未完成。旧版原生 Sheet 调用已废弃，当前代码只保留自建面板实验路径。
+当前状态：2026-08-01 12:23 已在目标游戏中验证独立入口、Runtime API 握手、主页菜单
+入口、点击 Hook、自建文本面板、三条 Runtime Mod 状态显示和显隐切换。字段解析日志为
+`commonView=0x58 subButtons=0x50 button=0x38 text=0x48`。M1 核心链路已完成，返回主页、
+重登和分辨率矩阵仍待补测。旧版原生 Sheet 调用已废弃。
 
 已完成：
 
 - `xinput9_1_0.dll` 独立 DLL 工程，并转发系统 XInput 9.1.0 API；
 - 不依赖 `version.dll` 或汉化插件的 Runtime 握手探针；
-- 同时尝试 `xinput1_3.dll` 与部署别名 `xinput3.dll`；
+- 通过已部署的 `xinput1_3.dll` 查找 Runtime API；源码中尚有一个未参与成功握手的历史错误候选名，已列为清理项；
 - `SIGNATURE_MATRIX.md` 和 `UI_FLOW.md`；
 - Release x64 DLL 编译验证。
 - 目标游戏加载 `xinput9_1_0.dll` 的实机日志验证；
 - 通过部署的 `xinput1_3.dll` 成功取得并调用 Runtime API v1。
 - 编译并部署菜单入口/自建面板实验版；旧版 `OpenNoticeSheetAsync` 探针已因崩溃风险废弃；
+- 修复字段指针未赋值回归和 ClearCache 模板点击穿透；
+- 实机确认“Mod 管理”入口可见且按钮动画正常；
+- 实机确认文本面板显示 3 个 Mod，并可隐藏/重新显示；
+- 保存通过验证的 DLL 大小、SHA-256、日志时间和截图证据。
 
-任务：
+剩余任务：
 
-- 修复当前构建的字段解析回归并重新验证主页菜单入口；
-- 验证自建面板的创建、显示、关闭和重复进入；
 - 验证重复进入主页、返回、重登和退出；
-- 验证服装原生 Cell；
-- 验证发型原生 Cell；
 - 截图记录不同分辨率结果。
 
-当前结论：M1 的 DLL 加载和 Runtime 握手已完成；菜单入口只在旧构建中验证过，当前构建仍需修复；原生 Sheet 直接调用不再作为实现路线。
+当前结论：M1 的核心技术风险已经解除；当前验证面板不是正式 UI，后续不应继续把放大的
+`MenuSubButtonView` 扩展成最终列表。
 
-退出条件：不接 Mod 数据时，空管理页面已能稳定打开、关闭且不破坏原游戏导航。
+退出条件：入口和最小数据面板已能打开、隐藏和重新显示；完成返回主页、重登和分辨率
+补测后关闭 M1。
 
 ### M2：Runtime 目录与 API v1
 
-当前状态：Runtime 目录、启停写回、API v1 导出、Manager 握手和一次快照读取已完成实机验证；
-正式列表绑定、统计展示和共享 SDK 整理仍待完成。`appliedThisSession` 仍需接入真实 AssetBundle 应用成功记录。
+当前状态：Runtime 目录、启停写回、API v1 导出、Manager 握手、快照解析和最小文本展示
+已完成实机验证；正式 Presentation Model、页面打开时刷新、共享 SDK 整理和 UI 开关绑定
+仍待完成。`appliedThisSession` 仍需接入真实 AssetBundle 应用成功记录。
 
 已完成：
 
@@ -801,6 +820,7 @@ gakumas-in-game-mod-manager\
 - Runtime catalog smoke test。
 - 游戏目录部署版 `xinput1_3.dll` 导出检查；
 - 管理器在目标游戏中成功完成 API v1 握手。
+- 管理器将快照解析为三条玩家可读文本并在游戏内显示。
 
 在 `gakumas-mod-runtime` 中完成：
 
@@ -814,8 +834,8 @@ gakumas-in-game-mod-manager\
 - 实现独立管理器 DLL 的注入握手与安全卸载；
 - 补充并发保护和单元测试。
 
-下一步：保留握手后的 Runtime Mod 快照读取作为数据通路基线；先修复菜单字段解析回归，
-再验证入口和自建面板，最后把快照绑定到正式列表。
+下一步：把 `BuildSheetBody()` 拆成快照读取、Presentation Model 和 View 绑定；正式页面每次
+打开重新取快照，并为后续开关写回保留稳定的 `modId`，不再只生成一次性字符串。
 
 退出条件：不依赖游戏 UI 的测试程序可以列出所有 Mod、切换 enabled，并验证重启前后状态语义。
 
@@ -964,8 +984,9 @@ gakumas-in-game-mod-manager\
 
 以下是需要通过实机和 IL2CPP metadata 确认的实现细节，不改变产品方向：
 
-- 主页菜单最稳定的 Presenter/View 接入方法；
-- 管理页面应使用独立 Screen 还是 Sheet；
+- 返回主页、重登和 View 重建时当前入口地址去重策略是否稳定；
+- 正式管理容器应使用独立 Screen/Sheet，还是独立 Canvas 子树；
+- 正式容器的关闭、返回、遮罩、输入阻断和排序层级；
 - 服装 Cell 的完整 Model/View/Presenter 签名；
 - 发型选择实际使用的 Cell 与数据模型；
 - CostumeHead 的 `hairAssetId` 与 source 的准确归一化规则；
@@ -973,22 +994,24 @@ gakumas-in-game-mod-manager\
 - 官方 Cell 是否能够在非原页面上下文独立加载图标；
 - 登录/登出时最可靠的缓存清理事件；
 - Runtime 现有 load history 如何稳定映射到 `appliedThisSession`；
-- 管理器 DLL 的最终加载时机与卸载顺序。
+- 管理器 DLL 的最终卸载顺序和 UI Hook 清理方式。
 
 这些项目应记录在后续 `SIGNATURE_MATRIX.md` 和调查日志中。未验证前不把猜测写成硬编码。
 
 ## 22. 下一步执行顺序
 
-规划确认后严格按以下顺序继续：
+从当前已验证状态继续：
 
-1. 在管理器握手成功后读取一次 Runtime Mod 快照并记录统计；
-2. 在目标游戏进程中验证主页菜单和 Sheet/Screen 签名；
-3. 验证服装 Cell；
-4. 验证发型 Cell；
-5. 将 Runtime/Manager API 头文件整理为单一共享 SDK；
-6. 接入真实 Runtime 快照并完成 UI 分页；
-7. 将 `appliedThisSession` 接入真实资源应用记录；
-8. 补齐异常与兼容测试；
-9. 再进入发布工作。
+1. 补完返回主页、重登、重复打开和分辨率的 M1 生命周期测试；
+2. 选择正式管理容器，先实现纯文本列表的打开、关闭、返回和刷新；
+3. 拆分 Runtime 快照、Presentation Model 与 View 绑定；
+4. 实现服装/发型分栏和玩家文案，不显示技术字段；
+5. 验证 Costume Master、服装 Cell 和官方图标；
+6. 验证 CostumeHead、发型 Cell 和官方图标；
+7. 接入 `setModEnabled`、待重启状态和写入失败恢复；
+8. 将 Runtime/Manager API 头文件整理为单一共享 SDK；
+9. 接入 `appliedThisSession` 真实记录并补齐异常/兼容测试；
+10. 完成发布构建、安装和卸载验证。
 
-该顺序优先消除最不确定的游戏 UI 和图标接入风险，避免先完成文件管理后才发现原生 UI 路径不可用。
+当前最优先的是正式容器和生命周期，不是继续美化验证面板，也不是开始任何借卡或网络
+API 功能。

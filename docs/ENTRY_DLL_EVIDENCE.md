@@ -30,6 +30,27 @@ XINPUT9_1_0.dll
 build\bin\x64\Release\xinput9_1_0.dll
 ```
 
+## 当前实机验证版本
+
+2026-08-01 12:23 的目标游戏测试使用：
+
+```text
+大小：196608 字节
+SHA-256：4AEFBEE12BC11509ACCFF62BA660D387AD395FA947B69AD0D9ECA19E82F7DBD5
+```
+
+`dumpbin /exports` 已确认继续导出：
+
+```text
+XInputGetCapabilities
+XInputGetDSoundAudioDeviceGuids
+XInputGetState
+XInputSetState
+```
+
+同一构建已在游戏内显示“Mod 管理”入口和最小文本面板，因此入口证据不再只停留在 PE
+导入表；自动加载、工作线程、Runtime API 握手和 UI Hook 均有实机日志。
+
 ## 重新验证
 
 ```powershell
