@@ -75,14 +75,36 @@ workspace "gakumas_mod_runtime"
 			"./src/runtime/**.def",
 			"./src/deps/UnityResolve/UnityResolve.hpp",
 			"./src/deps/nlohmann/json.hpp",
+			-- The in-game manager UI ships inside this DLL: one proxy slot, no
+			-- cross-module handshake.  See manager/README.md.
+			"./manager/include/gkmm/**.hpp",
+			"./manager/src/**.cpp",
 		}
 
 		includedirs {
 			"./src",
 			"./src/deps",
+			"./src/runtime",
+			"./manager/include",
 			"%{prj.location}/src",
 		}
 
 		dependencies.imports()
 
 		linkoptions "/SAFESEH:NO"
+
+	project "mod_presentation_tests"
+		language "C++"
+		kind "ConsoleApp"
+
+		files {
+			"./manager/include/gkmm/ModPresentationModel.hpp",
+			"./manager/include/gkmm/RuntimeModSnapshot.hpp",
+			"./manager/src/ModPresentationModel.cpp",
+			"./manager/src/RuntimeModSnapshot.cpp",
+			"./manager/tests/ModPresentationModelTests.cpp",
+		}
+
+		includedirs {
+			"./manager/include",
+		}

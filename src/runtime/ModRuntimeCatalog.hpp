@@ -6,6 +6,7 @@ namespace GakumasMod::Runtime::Catalog {
     void Refresh();
     void Clear();
     void SetReady(bool ready);
+    bool IsReady();
 
     GmrResult GetModsJson(GmrOwnedBuffer* output);
     void FreeBuffer(void* data);

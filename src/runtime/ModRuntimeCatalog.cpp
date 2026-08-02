@@ -513,6 +513,11 @@ namespace GakumasMod::Runtime::Catalog {
         g_ready = ready;
     }
 
+    bool IsReady() {
+        std::shared_lock lock(g_catalogMutex);
+        return g_ready;
+    }
+
     GmrResult GetModsJson(GmrOwnedBuffer* output) {
         if (!output) return GMR_E_INVALID_ARGUMENT;
         output->data = nullptr;

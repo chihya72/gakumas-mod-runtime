@@ -3,35 +3,26 @@
 #include <Windows.h>
 
 namespace GakumasModManager {
+    // The runtime now hosts this code, so the API is a direct call rather than
+    // a GetModuleHandle/GetProcAddress lookup.  The struct is still filled
+    // through GmrGetRuntimeApiV1 and still checked: it stays the single seam
+    // between the UI and the runtime, and keeps the export usable by others.
     bool RuntimeClient::Connect() {
-        constexpr const wchar_t* kRuntimeModules[] = {
-            L"xinput1_3.dll",
-        };
-
-        for (const auto moduleName : kRuntimeModules) {
-            const auto module = GetModuleHandleW(moduleName);
-            if (!module) continue;
-            const auto getApi = reinterpret_cast<GmrGetRuntimeApiV1Fn>(
-                GetProcAddress(module, "GmrGetRuntimeApiV1"));
-            if (!getApi) continue;
-
-            GmrRuntimeApiV1 candidate{};
-            candidate.structSize = sizeof(candidate);
-            candidate.apiVersion = GMR_API_VERSION_1;
-            if (getApi(&candidate) != GMR_OK
-                || candidate.structSize < sizeof(candidate)
-                || !candidate.getModsJson
-                || !candidate.freeBuffer
-                || !candidate.setModEnabled) {
-                continue;
-            }
-            api_ = candidate;
-            connected_ = true;
-            return true;
+        GmrRuntimeApiV1 candidate{};
+        candidate.structSize = sizeof(candidate);
+        candidate.apiVersion = GMR_API_VERSION_1;
+        if (GmrGetRuntimeApiV1(&candidate) != GMR_OK
+            || candidate.structSize < sizeof(candidate)
+            || !candidate.getModsJson
+            || !candidate.freeBuffer
+            || !candidate.setModEnabled) {
+            connected_ = false;
+            api_ = {};
+            return false;
         }
-        connected_ = false;
-        api_ = {};
-        return false;
+        api_ = candidate;
+        connected_ = true;
+        return true;
     }
 
     bool RuntimeClient::IsReady() const {

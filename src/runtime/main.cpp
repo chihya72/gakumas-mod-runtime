@@ -1,5 +1,7 @@
 #include "ModLog.hpp"
 #include "ModRuntime.hpp"
+#include "ModRuntimeCatalog.hpp"
+#include "gkmm/ManagerEntry.hpp"
 
 #include <Windows.h>
 
@@ -35,9 +37,14 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         SetGameWorkingDirectory();
         std::thread([] {
             GakumasMod::Runtime::Initialize();
+            // Same condition the manager used to poll GetModsJson for, now
+            // checked once: hooks may have failed while the catalog is still
+            // readable, and the UI is useful in that case too.
+            if (GakumasMod::Runtime::Catalog::IsReady()) GkmmInitialize();
         }).detach();
     }
     else if (reason == DLL_PROCESS_DETACH) {
+        GkmmShutdown();
         GakumasMod::Runtime::Shutdown();
     }
     return TRUE;

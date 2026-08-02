@@ -2,17 +2,21 @@
 
 学园偶像大师 DMM Windows 版的独立游戏内 AssetBundle Mod 管理器。
 
-管理器以 `xinput9_1_0.dll` 进入游戏进程，通过 `gakumas-mod-runtime` 的 Runtime API v1
-读取 Mod 目录和写入启用状态。它不使用汉化插件注入，不替换 `version.dll`，也不承担
-Mesh、材质或 AssetBundle 替换工作。
+管理器是本仓库 `xinput1_3.dll` 的一部分，由 Runtime 在自己的初始化线程末尾调用
+`GkmmInitialize()` 启动，通过 Runtime API v1 读取 Mod 目录和写入启用状态。它不使用
+汉化插件注入，不替换 `version.dll`，也不承担 Mesh、材质或 AssetBundle 替换工作。
+
+早期版本是独立的 `xinput9_1_0.dll`，靠 `GetModuleHandleW` 找 Runtime 并轮询最多 60 秒
+等它就绪。合并进同一个 DLL 后加载顺序和就绪竞争都不存在，那套握手已删除；
+`GmrGetRuntimeApiV1` 导出保留，仍是 UI 与 Runtime 之间唯一的接口。
 
 ## 当前状态
 
 截至 2026-08-01，以下主链已经在目标游戏中完成实机验证：
 
 ```text
-xinput9_1_0.dll 自动加载
-  → 找到 xinput1_3.dll 的 GmrGetRuntimeApiV1
+xinput1_3.dll 自动加载
+  → Runtime 初始化完成后调用 GkmmInitialize
   → 读取 1451 字节 Runtime Mod 快照
   → Hook MenuPresenter.SetEvent / CampusButtonBase.OnClicked
   → 在主页菜单克隆“Mod 管理”入口
@@ -29,7 +33,7 @@ xinput9_1_0.dll 自动加载
 - 全屏管理页、服装/发型分页、滚动区域和原生开关可见；
 - 固定 Mod 行、服装官方缩略图、服装/发型 Master 名称已经可见；
 - 开关写回成功，页面状态和 Runtime 当前会话会立即刷新；
-- 管理器、汉化 `version.dll` 和 Mod Runtime `xinput1_3.dll` 保持独立。
+- 管理器与 Mod Runtime 同处 `xinput1_3.dll`，与汉化 `version.dll` 保持独立。
 
 12:23 文字探针的历史实机基线：
 
@@ -68,12 +72,12 @@ SHA-256：221760876D257C45B37B22C10390BF9DCD6E197050E4D7BA0F4F3CBDD4377864
 - Runtime 启动时注册全部有效替换候选但仍保持 AssetBundle 懒加载；标准 `SkinnedMeshRenderer` 规则会保存替换前的 Mesh、材质和骨骼绑定。关闭和重新开启的热切换主链已经实机生效。IDA MCP 后为即时颜色加入的底层材质数组钩子和崩溃排查扫描已全部撤回，当前恢复为“不崩溃、热切换生效、直接回主页颜色可能错误、切页恢复”的调查前基线。整对象替换和附加式规则仍按重新加载资源降级。
 - 导航现在按页面身份幂等处理：Mod 页再次点“Mod 管理”只关闭菜单层；系统设置页点“Mod 管理”原位重构；Mod 页点系统设置则调用游戏的 `ICampusScreen.Reload()` 原位恢复干净设置页，避免多个 `SettingTopScreen` 交叉压栈。Reload 同时失效当前 `MenuView` 的注入缓存，使同地址菜单重新创建“Mod 管理”入口。
 
-当前已部署、待实机验证的管理器构建（2026-08-02）：`282112` 字节，SHA-256
-`C0F8F130CF7C457F1E467F5D78BE4DE5336AFD417EA87A6CD9812F8A04E7EADE`。
-同批部署的 Runtime 构建见 `gakumas-mod-runtime` 的 README，这里不再抄一份。
+当前已部署、待实机验证的合并构建（2026-08-03，Runtime + 管理器同一个 DLL）：
+`669696` 字节，SHA-256
+`E51CB88683A767D51C3624A78D5DB2BC416621E35CB634548ABA790C6C0F2059`。
 
 > 上面的历史基线是**证据记录**，对应当时的截图和日志，不要改；只有这一行"当前"需要
-> 随重编译更新。核对用 `Get-FileHash <游戏目录>\xinput9_1_0.dll -Algorithm SHA256`。
+> 随重编译更新。核对用 `Get-FileHash <游戏目录>\xinput1_3.dll -Algorithm SHA256`。
 
 ## 当前 UI 的边界
 
@@ -107,11 +111,11 @@ SHA-256：221760876D257C45B37B22C10390BF9DCD6E197050E4D7BA0F4F3CBDD4377864
 
 ```text
 version.dll       汉化插件，独立，不参与本项目
-xinput1_3.dll     gakumas-mod-runtime，负责 Mod 扫描、替换和 Runtime API
-xinput9_1_0.dll   本项目，负责游戏内管理 UI
+xinput1_3.dll     Runtime（Mod 扫描、替换、Runtime API）+ 本目录的游戏内管理 UI
 ```
 
-入口选择和 XInput 转发证据见 [`docs/ENTRY_DLL_EVIDENCE.md`](docs/ENTRY_DLL_EVIDENCE.md)。
+[`docs/ENTRY_DLL_EVIDENCE.md`](docs/ENTRY_DLL_EVIDENCE.md) 记录的是独立
+`xinput9_1_0.dll` 时期的入口选择和 XInput 转发证据，DLL 合并后仅作历史参考。
 
 ## 文档入口
 
@@ -120,49 +124,47 @@ xinput9_1_0.dll   本项目，负责游戏内管理 UI
 - [`docs/SIGNATURE_MATRIX.md`](docs/SIGNATURE_MATRIX.md)：当前 PC 已验证/待验证的 IL2CPP 成员；
 - [`docs/RESEARCH_SOURCES.md`](docs/RESEARCH_SOURCES.md)：metadata、dump 和日志的证据等级；
 - [`docs/OPEN_DEFECTS.md`](docs/OPEN_DEFECTS.md)：缺陷排查记录；三个里两个已实机关闭，只剩热开关后颜色；
-- [`docs/ENTRY_DLL_EVIDENCE.md`](docs/ENTRY_DLL_EVIDENCE.md)：`xinput9_1_0.dll` 加载依据。
+- [`docs/ENTRY_DLL_EVIDENCE.md`](docs/ENTRY_DLL_EVIDENCE.md)：独立 `xinput9_1_0.dll` 时期的加载依据（历史）。
 
 `BORROW_LIBRARY_CASE_STUDY.md` 只是早期 Campus UI/API 背景研究，不属于当前 Mod 管理器的
 产品范围或开发路线。
 
 ## 构建与实机日志
 
-### 前置：先在仓库根构建一次 Runtime
-
-管理器是 `gakumas-mod-runtime` 仓库下的子目录 `manager/`，不携带第三方源码，通过
-**相对路径**引用仓库根：
+管理器是 `gakumas-mod-runtime` 仓库下的子目录 `manager/`，和 Runtime 编进同一个
+`xinput1_3.dll`（根 `premake5.lua` 的 `gakumas_mod_runtime` 项目），不携带第三方源码：
 
 | 依赖 | 来自 | 用途 |
 |---|---|---|
-| `tools/premake5.exe` | `..\`（仓库根） | 生成本子项目的 sln（子目录没有 `generate.bat`） |
-| `deps/minhook/include` + 已编译的 `minhook.lib` | 同上（`build\bin\x64\Release\`） | `premake5.lua` 的 `includedirs` / `libdirs` / `links` |
+| `deps/minhook` | 仓库根 | UI hook 与 Runtime 共用同一份 |
 | `src/deps/nlohmann/json.hpp` | 同上 | `src/RuntimeModSnapshot.cpp` 直接 `#include` |
+| `src/deps/UnityResolve/UnityResolve.hpp` | 同上 | `src/CampusUiProbe.cpp` 直接 `#include` |
 | `src/runtime/ModRuntimeApi.h` | 同上 | Runtime API v1 的**唯一**定义，不再有子目录副本 |
-
-所以顺序是：先在仓库根跑一次 `generate.bat` + Release 构建，再进 `manager\`。
 
 ### 生成 sln 并编译
 
 Visual Studio 2022 / MSBuild Release x64：
 
+在**仓库根**执行，管理器没有自己的 sln：
+
 ```powershell
-..\tools\premake5.exe --file=premake5.lua vs2022
-msbuild build\gakumas_in_game_mod_manager.sln /m /p:Configuration=Release /p:Platform=x64
+.\generate.bat
+msbuild build\gakumas_mod_runtime.sln /m /p:Configuration=Release /p:Platform=x64
 ```
 
-只编管理器 DLL 加 `/t:xinput9_1_0_manager`；`mod_presentation_tests` 是不依赖游戏的
-离线测试，直接运行 `build\bin\x64\Release\mod_presentation_tests.exe` 即可。
+`mod_presentation_tests` 是不依赖游戏的离线测试，直接运行
+`build\bin\x64\Release\mod_presentation_tests.exe` 即可。
 
 产物：
 
 ```text
-build\bin\x64\Release\xinput9_1_0.dll
+build\bin\x64\Release\xinput1_3.dll
 ```
 
 部署到：
 
 ```text
-D:\Games\gakumas\xinput9_1_0.dll
+D:\Games\gakumas\xinput1_3.dll
 ```
 
 游戏必须由用户手动启动。管理器日志位于：

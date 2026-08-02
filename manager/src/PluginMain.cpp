@@ -1,17 +1,16 @@
 #include "gkmm/RuntimeClient.hpp"
 #include "gkmm/CampusUiProbe.hpp"
+#include "gkmm/ManagerEntry.hpp"
 #include "gkmm/ManagerLog.hpp"
 
 #include <Windows.h>
 
 #include <atomic>
-#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <string>
-#include <thread>
 
 namespace {
     std::atomic<bool> g_stop{false};
@@ -81,40 +80,24 @@ namespace {
         }
     }
 
-    void BootstrapThread() {
-        using namespace std::chrono_literals;
-        DebugLog("xinput9_1_0.dll loaded; manager bootstrap thread started.");
-        GakumasModManager::RuntimeClient runtime;
-        for (int attempt = 0; attempt < 600 && !g_stop.load(); ++attempt) {
-            if (runtime.Connect()) {
-                std::string snapshot;
-                if (runtime.GetModsJson(snapshot)) {
-                    char message[256]{};
-                    std::snprintf(message, sizeof(message),
-                        "Runtime API v1 ready (%zu-byte snapshot); starting the in-game UI probe.",
-                        snapshot.size());
-                    DebugLog(message);
-                    GakumasModManager::StartCampusUiProbe();
-                    return;
-                }
-            }
-            if (attempt == 0 || attempt % 100 == 0) {
-                DebugLog("Waiting for a ready Runtime API.");
-            }
-            std::this_thread::sleep_for(100ms);
-        }
-        if (g_stop.load()) {
-            DebugLog("Manager bootstrap stopped before Runtime API became ready.");
-        }
-        else {
-            DebugLog("M1 probe did not find a ready Runtime API; manager entry remains disabled.");
-        }
-    }
-
+    // The runtime calls in from its own init thread once the catalog is ready,
+    // so there is nothing left to wait for: no module-load race (one DLL) and
+    // no readiness race (the caller is the thing that became ready).
     void StartBootstrap() {
         if (g_started.exchange(true)) return;
         g_stop.store(false);
-        std::thread(BootstrapThread).detach();
+        GakumasModManager::RuntimeClient runtime;
+        std::string snapshot;
+        if (!runtime.Connect() || !runtime.GetModsJson(snapshot)) {
+            DebugLog("Runtime API v1 is not answering; manager entry remains disabled.");
+            return;
+        }
+        char message[256]{};
+        std::snprintf(message, sizeof(message),
+            "Runtime API v1 ready (%zu-byte snapshot); starting the in-game UI probe.",
+            snapshot.size());
+        DebugLog(message);
+        GakumasModManager::StartCampusUiProbe();
     }
 }
 
@@ -130,17 +113,7 @@ extern "C" bool GkmmInitialize() {
 }
 
 extern "C" void GkmmShutdown() {
+    if (!g_started.load()) return;
     g_stop.store(true);
     DebugLog("GkmmShutdown requested.");
-}
-
-BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
-    if (reason == DLL_PROCESS_ATTACH) {
-        DisableThreadLibraryCalls(module);
-        StartBootstrap();
-    }
-    else if (reason == DLL_PROCESS_DETACH) {
-        g_stop.store(true);
-    }
-    return TRUE;
 }
