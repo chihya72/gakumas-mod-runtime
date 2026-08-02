@@ -127,24 +127,26 @@ xinput9_1_0.dll   本项目，负责游戏内管理 UI
 
 ## 构建与实机日志
 
-### 前置：同级 `gakumas-mod-runtime` 必须已 checkout 并编译过
+### 前置：先在仓库根构建一次 Runtime
 
-本仓库不携带第三方源码，通过**相对路径**引用同级仓库，因此两个仓库必须并排放在同一父目录下：
+管理器是 `gakumas-mod-runtime` 仓库下的子目录 `manager/`，不携带第三方源码，通过
+**相对路径**引用仓库根：
 
 | 依赖 | 来自 | 用途 |
 |---|---|---|
-| `tools/premake5.exe` | `..\gakumas-mod-runtime\` | 生成本仓库的 sln（本仓库没有 `generate.bat`） |
+| `tools/premake5.exe` | `..\`（仓库根） | 生成本子项目的 sln（子目录没有 `generate.bat`） |
 | `deps/minhook/include` + 已编译的 `minhook.lib` | 同上（`build\bin\x64\Release\`） | `premake5.lua` 的 `includedirs` / `libdirs` / `links` |
 | `src/deps/nlohmann/json.hpp` | 同上 | `src/RuntimeModSnapshot.cpp` 直接 `#include` |
+| `src/runtime/ModRuntimeApi.h` | 同上 | Runtime API v1 的**唯一**定义，不再有子目录副本 |
 
-所以顺序是：先在 `gakumas-mod-runtime` 跑一次 `generate.bat` + Release 构建，再回本仓库。
+所以顺序是：先在仓库根跑一次 `generate.bat` + Release 构建，再进 `manager\`。
 
 ### 生成 sln 并编译
 
 Visual Studio 2022 / MSBuild Release x64：
 
 ```powershell
-..\gakumas-mod-runtime\tools\premake5.exe --file=premake5.lua vs2022
+..\tools\premake5.exe --file=premake5.lua vs2022
 msbuild build\gakumas_in_game_mod_manager.sln /m /p:Configuration=Release /p:Platform=x64
 ```
 

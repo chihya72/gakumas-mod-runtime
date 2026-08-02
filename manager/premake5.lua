@@ -42,7 +42,7 @@ workspace "gakumas_in_game_mod_manager"
             "./include/gkmm/ModPresentationModel.hpp",
             "./include/gkmm/RuntimeClient.hpp",
             "./include/gkmm/RuntimeModSnapshot.hpp",
-            "./include/gkmm/gmr_runtime_api.h",
+            "../src/runtime/ModRuntimeApi.h",
             "./src/PluginMain.cpp",
             "./src/ModPresentationModel.cpp",
             "./src/RuntimeClient.cpp",
@@ -53,11 +53,12 @@ workspace "gakumas_in_game_mod_manager"
         }
         includedirs {
             "./include",
-            "../gakumas-mod-runtime/deps/minhook/include",
+            "../src/runtime",
+            "../deps/minhook/include",
         }
 
         libdirs {
-            "../gakumas-mod-runtime/build/bin/%{cfg.platform}/%{cfg.buildcfg}",
+            "../build/bin/%{cfg.platform}/%{cfg.buildcfg}",
         }
 
         links {

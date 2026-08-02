@@ -1,6 +1,8 @@
 #pragma once
 
-#include "gmr_runtime_api.h"
+// The runtime owns this ABI; include its copy directly so a change to the
+// struct cannot compile against a stale duplicate.
+#include "ModRuntimeApi.h"
 
 #include <string>
 

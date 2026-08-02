@@ -8,7 +8,7 @@
 #include <Windows.h>
 #include <MinHook.h>
 
-#include "../../gakumas-mod-runtime/src/deps/UnityResolve/UnityResolve.hpp"
+#include "../../src/deps/UnityResolve/UnityResolve.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>

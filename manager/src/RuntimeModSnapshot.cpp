@@ -1,6 +1,6 @@
 #include "gkmm/RuntimeModSnapshot.hpp"
 
-#include "../../gakumas-mod-runtime/src/deps/nlohmann/json.hpp"
+#include "../../src/deps/nlohmann/json.hpp"
 
 #include <exception>
 #include <utility>
