@@ -62,13 +62,8 @@
 2026-08-02 确认的真实写入者是游戏调用 `Renderer.set_sharedMaterials` 替换了我们的私有材质。
 排除过程与下一步见管理器仓库 `docs/OPEN_DEFECTS.md`。
 
-当前已构建并部署版：
-
-```text
-D:\Games\gakumas\xinput1_3.dll
-大小：570880 字节
-SHA-256：F88C74F5FFB5114FE20B622AD82A1C877C6461725C95031419EF4E6A8065A969
-```
+当前已构建并部署版的大小与 SHA-256 见 [`../README.md`](../README.md)「当前验证状态」；
+这里不再抄一份，两处哈希曾经同时过期。
 
 IDA 后实验性的 `SetMaterialArray_Injected` 钩子、按钮帧末队列和受限 Renderer 扫描均已
 撤回；ON/OFF 调用链恢复为调查前的同步热恢复/热重应用实现。管理器 UI 修复不在回退范围内。

@@ -49,13 +49,19 @@ manifest 格式见 [docs/manifest-v2.md](docs/manifest-v2.md)，当前限制和�
 管理器仓库的
 `docs/OPEN_DEFECTS.md`。
 
-当前游戏目录部署版：
+当前游戏目录部署版（2026-08-02）：
 
 ```text
-D:\Games\gakumas\xinput1_3.dll
-大小：570880 字节
-SHA-256：F88C74F5FFB5114FE20B622AD82A1C877C6461725C95031419EF4E6A8065A969
+xinput1_3.dll
+大小：571904 字节
+SHA-256：03C941E56788F066FEC5FABEE0A391D722E5D98F5B05E80183462FA2D40D43C6
 ```
+
+> 手抄的哈希每次重编译就过期一次（这两行此前落后了一个构建）。核对用：
+>
+> ```powershell
+> Get-FileHash <游戏目录>\xinput1_3.dll -Algorithm SHA256
+> ```
 
 ## 构建
 

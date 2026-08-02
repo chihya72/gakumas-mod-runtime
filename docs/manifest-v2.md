@@ -64,6 +64,31 @@ gakumas-local/local-files/mods/<mod-id>/mod.json
 | `renderers` | 原 renderer 与 Mod renderer 的明确配对 |
 | `replaceMaterials` | 是否直接替换材质；通常保持 `false` 并使用贴图规则 |
 | `textures` | renderer、材质槽、shader property 与 Texture2D 资源的映射 |
+| `skeleton` | 可选。bundle 内骨架 sidecar（`TextAsset`）的资源路径；声明后 runtime 按 sidecar 建真实骨链，不再走旧的按名 remap 分支。兼容旧别名 `skeletonAsset` |
+
+## 骨架 sidecar
+
+`skeleton` 指向的 `TextAsset` 是一份 JSON。**它有三个硬性字段，缺任一或对不上，
+该 replacement 直接失败**（`ModRuntime.cpp` 的 `runtimeProtocol is required` /
+`buildId is required` / `bones array is required`）：
+
+| 字段 | 要求 |
+|---|---|
+| `runtimeProtocol` | 整数，**必须等于 `1`**。对不上即判定为导出器与 runtime 版本不匹配 |
+| `buildId` | 非空字符串，用于把 bundle 与日志对上号 |
+| `bones` | 数组。每项必须有 `name`（字符串）与 `localPosition` / `localRotation` / `localScale`；`parentIndex` 可选（默认 `-1` 表示根）。可选 `swing` 对象带 `damping` / `stiffness` / `spring` / `mass` / `rootWeight` / `pendulum` / `useWindGlobalForce` 与 `collider`（`radius` / `type` / `collisionMask`） |
+
+可选的 `extraSwingBones` / `newBones` 数组用同样的 transform 字段，但用 `parentName`
+而不是 `parentIndex` 挂接。
+
+> **摆动链要带链尾 tip 骨。**这不是 runtime 的校验项，是数据完整性要求：游戏的
+> `UpdateChainInfo` 本就排除每条链的最后一根骨，sidecar 少写 tip 就等于少一节摆动。
+> 无权重的 tip 骨不会出现在 `m_Bones` 里，导出器要显式补。
+
+`mod.json` 顶层也会带一份同值的 `runtimeProtocol` / `buildId`（由导出器写入，便于离线
+校验工具比对），但 runtime 只强制校验 sidecar 里的那份。
+
+GakumasMI 插件导出时自动生成 sidecar；**手写 manifest 时这三个字段最容易漏**。
 
 ## 部位约定
 
