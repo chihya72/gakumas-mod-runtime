@@ -1,0 +1,11 @@
+/build/
+/.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.pdb
+*.ilk
+*.log
+__pycache__/
+*.pyc
