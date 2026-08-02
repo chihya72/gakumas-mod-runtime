@@ -73,8 +73,8 @@ SHA-256：221760876D257C45B37B22C10390BF9DCD6E197050E4D7BA0F4F3CBDD4377864
 - 导航现在按页面身份幂等处理：Mod 页再次点“Mod 管理”只关闭菜单层；系统设置页点“Mod 管理”原位重构；Mod 页点系统设置则调用游戏的 `ICampusScreen.Reload()` 原位恢复干净设置页，避免多个 `SettingTopScreen` 交叉压栈。Reload 同时失效当前 `MenuView` 的注入缓存，使同地址菜单重新创建“Mod 管理”入口。
 
 当前已部署、待实机验证的合并构建（2026-08-03，Runtime + 管理器同一个 DLL）：
-`671232` 字节，SHA-256
-`E39E0126C879B30EAD5109EA1CA276501E9814F52CE7D7B765A9CBEE1CB6E164`。
+`673280` 字节，SHA-256
+`95D1BE29642388CB79A3DF2F32D99E09F40F870D91E3FE04C816484DD9670D49`。
 
 > 上面的历史基线是**证据记录**，对应当时的截图和日志，不要改；只有这一行"当前"需要
 > 随重编译更新。核对用 `Get-FileHash <游戏目录>\xinput1_3.dll -Algorithm SHA256`。
@@ -172,6 +172,11 @@ D:\Games\gakumas\xinput1_3.dll
 ```text
 D:\Games\gakumas\gakumas-mod\mod-manager.log
 ```
+
+日志等级由 `gakumas-mod/config.json` 的 `logLevel` 控制，与 Runtime 共用，默认
+`"error"`：本文件里那些 `Mod menu: ...` 诊断行属于 info，默认不写。排查时把它改成
+`"info"`。只有会关闭功能的行（入口未注入、注入 faulted、页面组合 faulted 等）保留在
+error 级，默认也能看到。
 
 ## 下一步
 

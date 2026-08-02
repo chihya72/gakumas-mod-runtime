@@ -103,9 +103,13 @@ workspace "gakumas_mod_runtime"
 			"./manager/src/ModPresentationModel.cpp",
 			"./manager/src/RuntimeModSnapshot.cpp",
 			"./manager/tests/ModPresentationModelTests.cpp",
-			-- Game-free by design, so the config outcomes stay testable offline.
+			-- Game-free by design, so the config and log-level outcomes stay
+			-- testable offline.  ModLog opens its file lazily on the first
+			-- message that passes the filter, so linking it writes nothing.
 			"./src/runtime/ModConfig.hpp",
 			"./src/runtime/ModConfig.cpp",
+			"./src/runtime/ModLog.hpp",
+			"./src/runtime/ModLog.cpp",
 		}
 
 		includedirs {

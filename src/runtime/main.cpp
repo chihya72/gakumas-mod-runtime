@@ -38,6 +38,35 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         DisableThreadLibraryCalls(module);
         SetGameWorkingDirectory();
         std::thread([] {
+            // Before Initialize: its own lines have to obey the configured
+            // level too.  SetGameWorkingDirectory already ran, so the relative
+            // config path resolves.
+            const auto requested = GakumasMod::Config::ReadLogLevel(
+                GakumasMod::Paths::Config());
+            if (requested) {
+                if (const auto level = GakumasMod::Log::ParseLevel(*requested)) {
+                    GakumasMod::Log::SetMinLevel(*level);
+                }
+                else {
+                    GakumasMod::Log::ErrorFmt(
+                        "[ModAsset] config.json: logLevel=\"%s\" is not info/warn/error;"
+                        " keeping error.",
+                        requested->c_str());
+                }
+            }
+
+            const char* levelName = "error";
+            switch (GakumasMod::Log::MinLevel()) {
+                case GakumasMod::Log::Level::Info: levelName = "info"; break;
+                case GakumasMod::Log::Level::Warn: levelName = "warn"; break;
+                case GakumasMod::Log::Level::Error: levelName = "error"; break;
+            }
+            GakumasMod::Log::BannerFmt(
+                "[ModAsset] gakumas-mod-runtime loaded. logLevel=%s (config.json: %s)."
+                " Raise it to \"info\" for a full trace.",
+                levelName,
+                requested ? "set" : "absent, using the default");
+
             GakumasMod::Runtime::Initialize();
             // Same condition the manager used to poll GetModsJson for, now
             // checked once: hooks may have failed while the catalog is still

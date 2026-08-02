@@ -4614,14 +4614,31 @@ namespace GakumasMod::Runtime {
             return method ? method->function : nullptr;
         }
 
+        // Two managed methods can resolve to one native function, and MinHook
+        // reports the second as ALREADY_CREATED.  That surfaced as an error
+        // every session for Renderer.set_materials while the earlier
+        // set_sharedMaterials hook was already covering both callers -- the
+        // shared hook body only mislabels which setter it logs.  Skipping is
+        // correct; both addresses are now logged so the pairing is provable
+        // from mod-plugin.log rather than assumed.
         template <typename Fn>
         bool InstallHook(const char* name, void* target, void* hook, Fn* original) {
             if (!target) {
                 Log::ErrorFmt("[ModAsset] Hook target is null: %s", name);
                 return false;
             }
+            if (std::find(g_hookTargets.begin(), g_hookTargets.end(), target)
+                != g_hookTargets.end()) {
+                Log::InfoFmt(
+                    "[ModAsset] Hook target already covered, skipped: %s target=%p"
+                    " (shares its native function with an earlier hook)",
+                    name,
+                    target);
+                return true;
+            }
             if (const auto status = MH_CreateHook(target, hook, reinterpret_cast<void**>(original)); status != MH_OK) {
-                Log::ErrorFmt("[ModAsset] MH_CreateHook failed: %s status=%s", name, MH_StatusToString(status));
+                Log::ErrorFmt("[ModAsset] MH_CreateHook failed: %s target=%p status=%s",
+                    name, target, MH_StatusToString(status));
                 return false;
             }
             if (const auto status = MH_EnableHook(target); status != MH_OK) {

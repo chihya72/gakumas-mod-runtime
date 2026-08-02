@@ -280,6 +280,15 @@ namespace GakumasModManager {
             Log(message);
         }
 
+        void LogErrorF(const char* format, ...) {
+            char message[1024]{};
+            va_list args;
+            va_start(args, format);
+            std::vsnprintf(message, sizeof(message), format, args);
+            va_end(args);
+            LogError(message);
+        }
+
         UnityResolve::Class* FindClassAcrossAssemblies(
             const char* className,
             const char* namespaze,
@@ -1114,7 +1123,7 @@ namespace GakumasModManager {
                 return CloseCurrentMenu();
             }
             __except (EXCEPTION_EXECUTE_HANDLER) {
-                Log("Mod menu: closing the global menu faulted.");
+                LogError("Mod menu: closing the global menu faulted.");
                 return false;
             }
         }
@@ -1734,7 +1743,7 @@ namespace GakumasModManager {
             }
             __except (EXCEPTION_EXECUTE_HANDLER) {
                 g_toggleBindings.clear();
-                Log("Mod menu: full-screen Setting composition faulted; original page retained.");
+                LogError("Mod menu: full-screen Setting composition faulted; original page retained.");
                 return false;
             }
         }
@@ -1747,7 +1756,7 @@ namespace GakumasModManager {
             if (!presenter || !g_commonViewField || g_commonViewField->offset < 0
                 || !g_subButtonsField || g_subButtonsField->offset < 0
                 || !g_buttonField || g_buttonField->offset < 0) {
-                Log("Mod menu: required presenter/view fields are unavailable; entry not injected.");
+                LogError("Mod menu: required presenter/view fields are unavailable; entry not injected.");
                 return nullptr;
             }
             const auto view = *reinterpret_cast<void**>(
@@ -1761,7 +1770,7 @@ namespace GakumasModManager {
             const auto dictionary = *reinterpret_cast<void**>(
                 static_cast<char*>(view) + g_subButtonsField->offset);
             if (!dictionary) {
-                Log("Mod menu: MenuView._subButtons is null; entry not injected.");
+                LogError("Mod menu: MenuView._subButtons is null; entry not injected.");
                 return nullptr;
             }
             LogF("Mod menu: step 2 view=%s dictionary=%s", ClassNameOf(view), ClassNameOf(dictionary));
@@ -1771,13 +1780,13 @@ namespace GakumasModManager {
             const auto templateButton = Call(g_getSubButton, view, {&templateType},
                                              "MenuView.GetSubButton");
             if (!templateButton) {
-                Log("Mod menu: no template sub button; entry not injected.");
+                LogError("Mod menu: no template sub button; entry not injected.");
                 return nullptr;
             }
             LogF("Mod menu: step 3 template=%s", ClassNameOf(templateButton));
             const auto templateCampusButton = ReadReferenceField(templateButton, g_buttonField);
             if (!templateCampusButton) {
-                Log("Mod menu: template has no CampusButton; entry not injected.");
+                LogError("Mod menu: template has no CampusButton; entry not injected.");
                 return nullptr;
             }
 
@@ -1786,7 +1795,7 @@ namespace GakumasModManager {
                 g_getButton, view, {&settingType}, "MenuView.GetButton(Setting)");
             g_settingButton = ReadReferenceField(settingView, g_buttonField);
             if (!settingView || !g_settingButton) {
-                Log("Mod menu: the real Setting button is unavailable; entry not injected.");
+                LogError("Mod menu: the real Setting button is unavailable; entry not injected.");
                 return nullptr;
             }
             LogF("Mod menu: native Setting route button=%s.", ClassNameOf(g_settingButton));
@@ -1799,7 +1808,7 @@ namespace GakumasModManager {
                 ? Call(g_getParent, templateTransform, {}, "Transform.get_parent")
                 : nullptr;
             if (!parent) {
-                Log("Mod menu: sub button parent not found; entry not injected.");
+                LogError("Mod menu: sub button parent not found; entry not injected.");
                 return nullptr;
             }
             LogF("Mod menu: step 5 parent=%s", ClassNameOf(parent));
@@ -1814,7 +1823,7 @@ namespace GakumasModManager {
                                     {templateButton, parent, &worldPositionStays},
                                     "Object.Internal_CloneSingleWithParent");
             if (!clone) {
-                Log("Mod menu: clone returned null; entry not injected.");
+                LogError("Mod menu: clone returned null; entry not injected.");
                 return nullptr;
             }
             LogF("Mod menu: step 6 clone=%s", ClassNameOf(clone));
@@ -1834,7 +1843,7 @@ namespace GakumasModManager {
                     bool active = false;
                     Call(g_setActive, cloneObject, {&active}, "disable inert clone");
                 }
-                Log("Mod menu: cloned entry has no CampusButton; injection disabled for this session.");
+                LogError("Mod menu: cloned entry has no CampusButton; injection disabled for this session.");
                 g_injectionFaulted.store(true);
                 return nullptr;
             }
@@ -1882,7 +1891,7 @@ namespace GakumasModManager {
             }
             __except (EXCEPTION_EXECUTE_HANDLER) {
                 g_injectionFaulted.store(true);
-                LogF("Mod menu: entry injection faulted at step %d; disabled for this session.",
+                LogErrorF("Mod menu: entry injection faulted at step %d; disabled for this session.",
                      g_injectStep.load());
                 return nullptr;
             }
@@ -1893,7 +1902,7 @@ namespace GakumasModManager {
                 ApplyLabel(button);
             }
             __except (EXCEPTION_EXECUTE_HANDLER) {
-                Log("Mod menu: applying the entry label faulted.");
+                LogError("Mod menu: applying the entry label faulted.");
             }
         }
 
@@ -2193,7 +2202,7 @@ namespace GakumasModManager {
             if (!g_objectGetClass || !g_classGetMethods || !g_methodGetName
                 || !g_methodGetParamCount || !g_runtimeInvoke || !g_classGetType
                 || !g_typeGetObject || !g_objectUnbox) {
-                Log("Mod menu: required il2cpp exports are missing; entry disabled.");
+                LogError("Mod menu: required il2cpp exports are missing; entry disabled.");
                 return;
             }
 
@@ -2213,7 +2222,7 @@ namespace GakumasModManager {
                 ? submodule->Get("CampusButtonBase", "Campus.Common")
                 : nullptr;
             if (!g_menuPresenter || !menuView || !buttonViewBase || !buttonBase) {
-                LogF("Mod menu: entry classes missing presenter=%d view=%d buttonView=%d "
+                LogErrorF("Mod menu: entry classes missing presenter=%d view=%d buttonView=%d "
                      "buttonBase=%d; entry disabled.",
                      g_menuPresenter != nullptr, menuView != nullptr,
                      buttonViewBase != nullptr, buttonBase != nullptr);

@@ -2,6 +2,7 @@
 #include "gkmm/RuntimeModSnapshot.hpp"
 
 #include "ModConfig.hpp"
+#include "ModLog.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -236,6 +237,49 @@ namespace {
 
         std::filesystem::remove_all(dir, ec);
     }
+
+    void TestLogLevelConfig() {
+        using GakumasMod::Log::Level;
+        using GakumasMod::Log::ParseLevel;
+
+        CHECK(ParseLevel("info") == Level::Info);
+        CHECK(ParseLevel("WARN") == Level::Warn);
+        CHECK(ParseLevel("Error") == Level::Error);
+        CHECK(!ParseLevel("verbose").has_value());
+        CHECK(!ParseLevel("").has_value());
+
+        // Ordering is what the filter relies on: error survives every level.
+        CHECK(Level::Error > Level::Warn && Level::Warn > Level::Info);
+
+        const auto dir = std::filesystem::temp_directory_path() / "gkms-loglevel-test";
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        const auto path = dir / "config.json";
+        const auto write = [&path](const char* text) {
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            out << text;
+        };
+        const auto read = [&path] {
+            return GakumasMod::Config::ReadLogLevel(path);
+        };
+
+        std::filesystem::remove(path, ec);
+        CHECK(!read().has_value());                       // absent
+        write("{ not json");
+        CHECK(!read().has_value());                       // unparseable
+        write("{}");
+        CHECK(!read().has_value());                       // key missing
+        write("{\"logLevel\": 3}");
+        CHECK(!read().has_value());                       // wrong type
+        write("{\"logLevel\": \"info\", \"modManagerUi\": false}");
+        CHECK(read().value() == "info");                  // both keys coexist
+        CHECK(GakumasMod::Config::ReadManagerUiEnabled(path) == false);
+        write("{\"logLevel\": \"nonsense\"}");
+        CHECK(read().value() == "nonsense");              // verbatim; caller rejects
+        CHECK(!ParseLevel(*read()).has_value());
+
+        std::filesystem::remove_all(dir, ec);
+    }
 }
 
 int main() {
@@ -246,6 +290,7 @@ int main() {
         TestOrderingDoesNotChangeWithToggleState();
         TestHairAssetKeyNormalization();
         TestManagerUiConfig();
+        TestLogLevelConfig();
     }
     catch (const std::exception& failure) {
         std::cout << "ModPresentationModelTests FAILED: " << failure.what() << "\n";

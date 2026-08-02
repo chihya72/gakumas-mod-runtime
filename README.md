@@ -91,15 +91,25 @@ gakumas-mod/mods/<mod-id>/
   your-mod.bundle
 ```
 
-游戏内 Mod 管理界面默认开启。要关掉它（Mod 替换照常工作），在
-`gakumas-mod/config.json` 写：
+## gakumas-mod/config.json
+
+两个键，都可省略：
 
 ```json
-{ "modManagerUi": false }
+{
+  "modManagerUi": true,
+  "logLevel": "error"
+}
 ```
 
-只有这个明确的 `false` 会关闭界面；文件不存在、JSON 写错或键名打错都按开启处理，
-实际取值会写进 `gakumas-mod/mod-plugin.log`。
+- `modManagerUi`：游戏内 Mod 管理界面开关，默认开。只有明确写 `false` 才关闭
+  （Mod 替换照常工作）；文件不存在、JSON 写错或键名打错都按开启处理。
+- `logLevel`：`"info"` / `"warn"` / `"error"`，默认 `"error"`。默认只记录错误，
+  排查问题时改成 `"info"` 拿完整 trace。`mod-plugin.log` 和 `mod-manager.log`
+  共用这一个等级。
+
+无论等级如何，启动都会写一行 `[BOOT]` 记录当前生效的等级——所以日志文件永远存在，
+"没有日志"只可能意味着插件没被加载。
 
 ## 作者诊断
 

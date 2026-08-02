@@ -3,6 +3,8 @@
 
 #include <Windows.h>
 
+#include <atomic>
+#include <cctype>
 #include <cstdarg>
 #include <cstdio>
 #include <filesystem>
@@ -39,20 +41,48 @@ namespace GakumasMod::Log {
             return stream;
         }
 
-        void Write(const char* level, const char* msg) {
+        std::atomic<Level> g_minLevel{Level::Error};
+
+        void Write(const Level level, const char* label, const char* msg) {
+            if (level < g_minLevel.load(std::memory_order_relaxed)) return;
             static std::mutex mutex;
             std::lock_guard lock(mutex);
 
             auto& stream = Stream();
             if (stream.is_open()) {
-                stream << "[" << level << "] GakumasMod: " << (msg ? msg : "") << '\n';
+                stream << "[" << label << "] GakumasMod: " << (msg ? msg : "") << '\n';
                 stream.flush();
             }
 
             char debugLine[4096]{};
-            std::snprintf(debugLine, sizeof(debugLine), "[%s] GakumasMod: %s\n", level, msg ? msg : "");
+            std::snprintf(debugLine, sizeof(debugLine), "[%s] GakumasMod: %s\n", label, msg ? msg : "");
             OutputDebugStringA(debugLine);
         }
+    }
+
+    void SetMinLevel(const Level level) {
+        g_minLevel.store(level, std::memory_order_relaxed);
+    }
+
+    Level MinLevel() {
+        return g_minLevel.load(std::memory_order_relaxed);
+    }
+
+    bool IsEnabled(const Level level) {
+        return level >= g_minLevel.load(std::memory_order_relaxed);
+    }
+
+    std::optional<Level> ParseLevel(const std::string_view name) {
+        std::string lowered;
+        lowered.reserve(name.size());
+        for (const auto c : name) {
+            lowered.push_back(static_cast<char>(
+                std::tolower(static_cast<unsigned char>(c))));
+        }
+        if (lowered == "info") return Level::Info;
+        if (lowered == "warn") return Level::Warn;
+        if (lowered == "error") return Level::Error;
+        return std::nullopt;
     }
 
     std::string Format(const char* fmt, ...) {
@@ -63,11 +93,25 @@ namespace GakumasMod::Log {
         return result;
     }
 
+    void Banner(const char* msg) {
+        // MinLevel() as its own level: passes the filter by construction.
+        Write(MinLevel(), "BOOT", msg);
+    }
+
+    void BannerFmt(const char* fmt, ...) {
+        va_list args;
+        va_start(args, fmt);
+        const auto result = VFormat(fmt, args);
+        va_end(args);
+        Banner(result.c_str());
+    }
+
     void Info(const char* msg) {
-        Write("INFO", msg);
+        Write(Level::Info, "INFO", msg);
     }
 
     void InfoFmt(const char* fmt, ...) {
+        if (!IsEnabled(Level::Info)) return;
         va_list args;
         va_start(args, fmt);
         const auto result = VFormat(fmt, args);
@@ -76,10 +120,11 @@ namespace GakumasMod::Log {
     }
 
     void Warn(const char* msg) {
-        Write("WARN", msg);
+        Write(Level::Warn, "WARN", msg);
     }
 
     void WarnFmt(const char* fmt, ...) {
+        if (!IsEnabled(Level::Warn)) return;
         va_list args;
         va_start(args, fmt);
         const auto result = VFormat(fmt, args);
@@ -88,10 +133,11 @@ namespace GakumasMod::Log {
     }
 
     void Error(const char* msg) {
-        Write("ERROR", msg);
+        Write(Level::Error, "ERROR", msg);
     }
 
     void ErrorFmt(const char* fmt, ...) {
+        if (!IsEnabled(Level::Error)) return;
         va_list args;
         va_start(args, fmt);
         const auto result = VFormat(fmt, args);

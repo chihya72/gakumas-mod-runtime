@@ -3,6 +3,7 @@
 #include "gkmm/ManagerEntry.hpp"
 #include "gkmm/ManagerLog.hpp"
 
+#include "ModLog.hpp"
 #include "ModPaths.hpp"
 
 #include <Windows.h>
@@ -50,7 +51,7 @@ namespace {
         return result;
     }
 
-    void DebugLog(const char* message) {
+    void WriteLog(const char* message) {
         SYSTEMTIME now{};
         GetLocalTime(&now);
         static const auto processName = ProcessName();
@@ -92,21 +93,30 @@ namespace {
         GakumasModManager::RuntimeClient runtime;
         std::string snapshot;
         if (!runtime.Connect() || !runtime.GetModsJson(snapshot)) {
-            DebugLog("Runtime API v1 is not answering; manager entry remains disabled.");
+            GakumasModManager::LogError(
+                "Runtime API v1 is not answering; manager entry remains disabled.");
             return;
         }
         char message[256]{};
         std::snprintf(message, sizeof(message),
             "Runtime API v1 ready (%zu-byte snapshot); starting the in-game UI probe.",
             snapshot.size());
-        DebugLog(message);
+        GakumasModManager::Log(message);
         GakumasModManager::StartCampusUiProbe();
     }
 }
 
 namespace GakumasModManager {
+    // The manager keeps its own file but shares the runtime's level, so one
+    // config key controls both logs.
     void Log(const char* message) {
-        DebugLog(message);
+        if (!GakumasMod::Log::IsEnabled(GakumasMod::Log::Level::Info)) return;
+        WriteLog(message);
+    }
+
+    void LogError(const char* message) {
+        if (!GakumasMod::Log::IsEnabled(GakumasMod::Log::Level::Error)) return;
+        WriteLog(message);
     }
 }
 
@@ -118,5 +128,5 @@ extern "C" bool GkmmInitialize() {
 extern "C" void GkmmShutdown() {
     if (!g_started.load()) return;
     g_stop.store(true);
-    DebugLog("GkmmShutdown requested.");
+    GakumasModManager::Log("GkmmShutdown requested.");
 }
