@@ -144,7 +144,7 @@ IDA 进一步确认底层写入链：`VLActorFaceModel.UpdateSharedMaterials()`
 | 开关写回 | `RuntimeClient::SetModEnabled` / `CampusUiProbe.cpp::HandleModToggle` | Runtime 与 Manifest 写回、帧末视觉校正均已实机确认 |
 | 幂等导航 | `g_activeModTab` / `PressHook` / `ReloadActiveModScreenAsSettings` | 21:13–21:14 三个分支日志为 A；Reload 后入口缓存失效为 B，待复验 |
 | 稳定排序 | `ModPresentationModel.cpp::SortItems` | 本地测试确认开关状态互换后顺序保持 `名称 + modId` |
-| Master 目标与缩略图 | `ResolveGameTarget` / `AttachOfficialGameThumbnail` / `AttachOfficialHeadThumbnail` | 服装名称与缩略图、发型名称为 A；发型资源提交为 A，最终可见为 B |
+| Master 目标与缩略图 | `ResolveGameTarget` / `AttachOfficialGameThumbnail` | 服装名称与缩略图为 A；发型改走同一条 `CostumeThumbnailView.Set(ICostume)`（master `CostumeHead` 实现 `ICostume`，dump.cs 确认），空态标签与长按详情为 B，待实机复验 |
 | Runtime 热恢复 | `ModRuntime.cpp::SetModEnabled` / 热恢复扫描 | 用户确认 OFF/ON 生效，Runtime 日志记录重应用和 Rig 刷新 |
 | 即时颜色提交 | `ModRuntime.cpp::RestorePatchedMaterials` | **未修复**。旧 MPB 覆盖结论已被实机证伪（`SetPropertyBlock` 从不触发）；真实写入者是游戏调用 `set_sharedMaterials`。见 `OPEN_DEFECTS.md` |
 

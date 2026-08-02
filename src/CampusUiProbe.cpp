@@ -37,8 +37,11 @@ namespace GakumasModManager {
         //     cloned CampusButton is recognised by identity in OnClicked;
         //   * MenuButtonType 21..43 (minus 31/36/40) never appear out-game.
 
-        // ClearCache, always present in the out-game sub button row.
+        // ClearCache, always present in the out-game sub button row.  Only its
+        // slot and wiring are wanted; the trash-can icon it ships with is
+        // replaced below by the Costume icon, which is what this entry manages.
         constexpr std::int32_t kTemplateButtonType = 40;
+        constexpr std::int32_t kEntryIconButtonType = 9;  // MenuButtonType.Costume
 
         using AfterInitFn = void(UNITY_CALLING_CONVENTION*)(void* self, void* method);
         using SetEventFn = void(UNITY_CALLING_CONVENTION*)(void* self, void* method);
@@ -120,6 +123,8 @@ namespace GakumasModManager {
         UnityResolve::Field* g_vsyncToggleField{};
         UnityResolve::Field* g_switchInnerButtonField{};
         UnityResolve::Field* g_overlayTitleViewField{};
+        UnityResolve::Field* g_menuButtonIconField{};
+        UnityResolve::Field* g_menuButtonIconSettingField{};
 
         // MethodInfo* resolved by name + parameter count.  Deliberately not
         // UnityResolve::Method: its overload matcher falls back to "first method
@@ -130,6 +135,8 @@ namespace GakumasModManager {
         const void* g_getSubButton{};
         const void* g_getButton{};
         const void* g_setCustomText{};
+        const void* g_menuIconSettingGetSprite{};
+        const void* g_imageSetSprite{};
         const void* g_setSelectedButtonType{};
         const void* g_outGameOnSelected{};
         const void* g_reloadSettingScreen{};
@@ -187,12 +194,10 @@ namespace GakumasModManager {
         const void* g_costumeHeadGetName{};
         const void* g_costumeHeadGetCharacter{};
         const void* g_costumeHeadGetHairAssetId{};
-        const void* g_costumeHeadGetThumbAssetName{};
         const void* g_characterGetName{};
         const void* g_commonCostumeThumbnailSet{};
         const void* g_costumeThumbnailSetShowDetail{};
         const void* g_thumbnailSetGestureEnabled{};
-        const void* g_thumbnailViewBaseSetAssetName{};
 
         void* g_settingScreenViewType{};
         void* g_settingScreenPresenterType{};
@@ -201,7 +206,6 @@ namespace GakumasModManager {
         void* g_switchButtonType{};
         void* g_campusSimpleTabType{};
         void* g_commonCostumeThumbnailType{};
-        void* g_thumbnailViewBaseType{};
 
         std::atomic<bool> g_modScreenPending{false};
         std::atomic<std::uint32_t> g_pendingPollFrames{0};
@@ -945,6 +949,13 @@ namespace GakumasModManager {
         // only forwards to the inner thumbnail, so cloning it produced a
         // shrunken icon whose long-press detail was never wired.  Set() on this
         // class registers the detail callback itself.
+        //
+        // Hair rows come through here too: Set takes ICostume, and master
+        // CostumeHead implements ICostume just like Costume does.  The earlier
+        // head-only path called the ThumbnailViewBase.Set(assetName) base
+        // method instead, which swapped the sprite but left the derived view
+        // uninitialised -- _emptyRoot stayed visible ("未设置" on top of the
+        // correct icon) and no long-press detail callback was ever registered.
         bool AttachOfficialGameThumbnail(
             void* rowTransform,
             void* costume) {
@@ -1035,111 +1046,6 @@ namespace GakumasModManager {
                     "Mod menu: skipped %zu manager-owned costume thumbnail template candidates.",
                     ownedCandidatesSkipped);
             }
-            return false;
-        }
-
-        bool AttachOfficialHeadThumbnail(
-            void* rowTransform,
-            void* costumeHead) {
-            if (!rowTransform || !costumeHead || !g_costumeHeadGetThumbAssetName
-                || !g_thumbnailViewBaseType || !g_thumbnailViewBaseSetAssetName
-                || !g_resourcesFindObjectsOfTypeAll) {
-                return false;
-            }
-
-            const auto assetName = ManagedStringValue(
-                costumeHead,
-                g_costumeHeadGetThumbAssetName,
-                "CostumeHead.GetThumbAssetName");
-            if (assetName.empty()) {
-                Log("Mod menu: CostumeHead returned an empty thumbnail asset name.");
-                return false;
-            }
-
-            std::size_t ownedCandidatesSkipped = 0;
-            const auto candidates = CollectThumbnailTemplateCandidates(
-                g_thumbnailViewBaseType,
-                "Resources.FindObjectsOfTypeAll(ThumbnailViewBase)",
-                ownedCandidatesSkipped);
-            if (candidates.empty()) {
-                LogF("Mod menu: no ThumbnailViewBase source is loaded for head asset=%s.",
-                     assetName.c_str());
-                return false;
-            }
-
-            // Prefer the same square game component already used by costume
-            // thumbnails.  Fall back to any loaded ThumbnailViewBase only when
-            // that exact component is unavailable.
-            for (int pass = 0; pass < 2; ++pass) {
-                for (const auto& candidate : candidates) {
-                    const auto source = candidate.component;
-                    const auto isCostumeThumbnail =
-                        std::strcmp(ClassNameOf(source), "CostumeThumbnailView") == 0;
-                    if ((pass == 0 && !isCostumeThumbnail)
-                        || (pass == 1 && isCostumeThumbnail)) {
-                        continue;
-                    }
-
-                    const auto sourceObject = candidate.gameObject;
-
-                    bool worldPositionStays = false;
-                    const auto cloneObject = Call(
-                        g_cloneWithParent,
-                        nullptr,
-                        {sourceObject, rowTransform, &worldPositionStays},
-                        "clone official head thumbnail");
-                    const auto clone = cloneObject
-                        ? Call(
-                            g_getComponentByType,
-                            cloneObject,
-                            {g_thumbnailViewBaseType},
-                            "head thumbnail clone GetComponent")
-                        : nullptr;
-                    const auto rect = cloneObject
-                        ? Call(
-                            g_gameObjectGetTransform,
-                            cloneObject,
-                            {},
-                            "head thumbnail clone get_transform")
-                        : nullptr;
-                    if (!clone || !rect) continue;
-                    g_ownedThumbnailComponents.emplace(clone);
-
-                    bool active = true;
-                    Call(g_setActive,
-                         cloneObject,
-                         {&active},
-                         "activate official head thumbnail clone");
-                    bool succeeded = false;
-                    Call(g_thumbnailViewBaseSetAssetName,
-                         clone,
-                         {UnityResolve::UnityType::String::New(assetName)},
-                         "ThumbnailViewBase.Set(head assetName)",
-                         &succeeded);
-                    if (!succeeded) {
-                        active = false;
-                        Call(g_setActive,
-                             cloneObject,
-                             {&active},
-                             "hide failed head thumbnail clone");
-                        continue;
-                    }
-
-                    ConfigureThumbnailRect(rect);
-                    RestoreThumbnailInteraction(clone);
-                    LogF("Mod menu: official head thumbnail attached asset=%s source=%s object=%p active=%d sourceSize=%.1fx%.1f skippedOwned=%zu.",
-                          assetName.c_str(),
-                          ClassNameOf(source),
-                          source,
-                          candidate.activeInHierarchy ? 1 : 0,
-                          candidate.size.x,
-                          candidate.size.y,
-                          ownedCandidatesSkipped);
-                    return true;
-                }
-            }
-            LogF("Mod menu: loaded ThumbnailViewBase sources could not render head asset=%s.",
-                 assetName.c_str());
             return false;
         }
 
@@ -1396,9 +1302,11 @@ namespace GakumasModManager {
             }
             if (item && !texts.empty()) {
                 ConfigureTitleAutoSize(texts[0]);
-                const bool hasOfficialThumbnail = item->category == ModCategory::Hair
-                    ? AttachOfficialHeadThumbnail(cloneTransform, target.costumeHead)
-                    : AttachOfficialGameThumbnail(cloneTransform, target.costume);
+                const bool hasOfficialThumbnail = AttachOfficialGameThumbnail(
+                    cloneTransform,
+                    item->category == ModCategory::Hair
+                        ? target.costumeHead
+                        : target.costume);
                 if (!hasOfficialThumbnail) {
                     AttachCategoryPlaceholder(
                         cloneTransform, texts[0], item->category);
@@ -1769,7 +1677,7 @@ namespace GakumasModManager {
             if (overlayTitle) {
                 Call(g_overlayTitleSetTitle,
                      overlayTitle,
-                     {UnityResolve::UnityType::String::New("Mod 管理")},
+                     {UnityResolve::UnityType::String::New("MOD 管理")},
                      "OverlayTitleView.SetTitle");
             }
 
@@ -1936,11 +1844,31 @@ namespace GakumasModManager {
             return clone;
         }
 
+        // MenuButtonViewBase.SetIcon is private and reads _buttonType, which
+        // still says ClearCache on the clone; ask the shared icon ScriptableObject
+        // the clone already carries for another type's sprite instead.
+        void ApplyIcon(void* button) {
+            const auto setting = ReadReferenceField(button, g_menuButtonIconSettingField);
+            const auto icon = ReadReferenceField(button, g_menuButtonIconField);
+            if (!setting || !icon || !g_menuIconSettingGetSprite || !g_imageSetSprite) return;
+            std::int32_t iconType = kEntryIconButtonType;
+            const auto sprite = Call(g_menuIconSettingGetSprite,
+                                     setting,
+                                     {&iconType},
+                                     "MenuButtonIconSetting.GetSprite");
+            if (!sprite) {
+                Log("Mod menu: no entry icon sprite; the template icon is kept.");
+                return;
+            }
+            Call(g_imageSetSprite, icon, {sprite}, "entry Image.set_sprite");
+        }
+
         void ApplyLabel(void* button) {
             if (!button) return;
             Call(g_setCustomText, button,
-                 {UnityResolve::UnityType::String::New("Mod 管理")},
+                 {UnityResolve::UnityType::String::New("MOD 管理")},
                  "MenuButtonViewBase.SetCustomText");
+            ApplyIcon(button);
         }
 
         // ponytail: SEH around the two paths that drive live UI.  A wrong
@@ -2316,6 +2244,9 @@ namespace GakumasModManager {
                 "CampusText", "Campus.Common", {submodule, assembly});
             const auto overlayTitle = FindClassAcrossAssemblies(
                 "OverlayTitleView", "Campus.Common", {assembly, submodule});
+            const auto menuButtonIconSetting = assembly
+                ? assembly->Get("MenuButtonIconSetting", "Campus.Common") : nullptr;
+            const auto image = ui ? ui->Get("Image", "UnityEngine.UI") : nullptr;
             const auto scrollRect = ui ? ui->Get("ScrollRect", "UnityEngine.UI") : nullptr;
             const auto layoutRebuilder = ui
                 ? ui->Get("LayoutRebuilder", "UnityEngine.UI") : nullptr;
@@ -2340,12 +2271,13 @@ namespace GakumasModManager {
             const auto commonCostumeThumbnail = assembly
                 ? assembly->Get("CostumeThumbnailView", "Campus.Common.UI")
                 : nullptr;
-            const auto thumbnailViewBase = FindClassAcrossAssemblies(
-                "ThumbnailViewBase", "Campus.Common.UI", {assembly, submodule});
             g_commonViewField = g_menuPresenter->Get<UnityResolve::Field>("_commonView");
             g_subButtonsField = menuView->Get<UnityResolve::Field>("_subButtons");
             g_buttonField = buttonViewBase->Get<UnityResolve::Field>("_button");
             g_textField = buttonViewBase->Get<UnityResolve::Field>("_text");
+            g_menuButtonIconField = buttonViewBase->Get<UnityResolve::Field>("_icon");
+            g_menuButtonIconSettingField =
+                buttonViewBase->Get<UnityResolve::Field>("_setting");
             g_menuCloseButtonField = menuView->Get<UnityResolve::Field>("_closeButton");
             g_settingTabField = settingTopPresenter
                 ? settingTopPresenter->Get<UnityResolve::Field>("_tab") : nullptr;
@@ -2360,6 +2292,11 @@ namespace GakumasModManager {
             g_getSubButton = FindMethodInClass(menuView->address, "GetSubButton", 1);
             g_getButton = FindMethodInClass(menuView->address, "GetButton", 1);
             g_setCustomText = FindMethodInClass(buttonViewBase->address, "SetCustomText", 1);
+            g_menuIconSettingGetSprite = menuButtonIconSetting
+                ? FindMethodInClass(menuButtonIconSetting->address, "GetSprite", 1)
+                : nullptr;
+            g_imageSetSprite = image
+                ? FindMethodInClass(image->address, "set_sprite", 1) : nullptr;
             g_setSelectedButtonType = FindMethodInClass(
                 g_menuPresenter->address, "set_SelectedButtonType", 1);
             g_outGameOnSelected = outGameMenuPresenter
@@ -2474,8 +2411,6 @@ namespace GakumasModManager {
                 ? FindMethodInClass(costumeHead->address, "GetCharacter", 0) : nullptr;
             g_costumeHeadGetHairAssetId = costumeHead
                 ? FindMethodInClass(costumeHead->address, "get_HairAssetId", 0) : nullptr;
-            g_costumeHeadGetThumbAssetName = costumeHead
-                ? FindMethodInClass(costumeHead->address, "GetThumbAssetName", 0) : nullptr;
             g_characterGetName = character
                 ? FindMethodInClass(character->address, "get_Name", 0) : nullptr;
             g_commonCostumeThumbnailSet = commonCostumeThumbnail
@@ -2489,9 +2424,6 @@ namespace GakumasModManager {
                 ? FindMethodInClass(
                     commonCostumeThumbnail->address, "SetGestureEnabled", 1)
                 : nullptr;
-            g_thumbnailViewBaseSetAssetName = thumbnailViewBase
-                ? FindMethodInClass(thumbnailViewBase->address, "Set", 1)
-                : nullptr;
             g_settingScreenViewType = ManagedTypeOf(settingTopView);
             g_settingScreenPresenterType = ManagedTypeOf(settingTopPresenter);
             g_scrollRectType = ManagedTypeOf(scrollRect);
@@ -2499,7 +2431,6 @@ namespace GakumasModManager {
             g_switchButtonType = ManagedTypeOf(switchButton);
             g_campusSimpleTabType = ManagedTypeOf(campusSimpleTab);
             g_commonCostumeThumbnailType = ManagedTypeOf(commonCostumeThumbnail);
-            g_thumbnailViewBaseType = ManagedTypeOf(thumbnailViewBase);
             if (core) {
                 const auto objectClass = core->Get("Object");
                 const auto componentClass = core->Get("Component");
@@ -2558,6 +2489,14 @@ namespace GakumasModManager {
                   static_cast<unsigned>(g_subButtonsField ? g_subButtonsField->offset : -1),
                   static_cast<unsigned>(g_buttonField ? g_buttonField->offset : -1),
                   static_cast<unsigned>(g_textField ? g_textField->offset : -1));
+            LogF("Mod menu: entry icon symbols icon=0x%X setting=0x%X getSprite=%d setSprite=%d.",
+                  static_cast<unsigned>(
+                      g_menuButtonIconField ? g_menuButtonIconField->offset : -1),
+                  static_cast<unsigned>(
+                      g_menuButtonIconSettingField
+                          ? g_menuButtonIconSettingField->offset : -1),
+                  g_menuIconSettingGetSprite != nullptr,
+                  g_imageSetSprite != nullptr);
             LogF("Mod menu: native Setting route presenter=%d setSelected=%d onSelected=%d "
                  "closeButton=%d reload=%d presenterType=%d.",
                   outGameMenuPresenter != nullptr,
@@ -2568,6 +2507,8 @@ namespace GakumasModManager {
                   g_settingScreenPresenterType != nullptr);
             LogF("Mod menu: game target symbols masters=%d/%d lists=%d/%d "
                  "records=%d/%d/%d thumbnails=%d/%d/%d resources=%d.",
+                 // thumbnails: Set+IsShowDetailEnabled / SetGestureEnabled /
+                 // CostumeThumbnailView type -- costume and hair share all three.
                  g_masterManagerGetCostumeMaster != nullptr,
                  g_masterManagerGetCostumeHeadMaster != nullptr,
                  g_costumeMasterGetAll != nullptr,
@@ -2578,9 +2519,7 @@ namespace GakumasModManager {
                  g_commonCostumeThumbnailSet != nullptr
                      && g_costumeThumbnailSetShowDetail != nullptr,
                  g_thumbnailSetGestureEnabled != nullptr,
-                 g_costumeHeadGetThumbAssetName != nullptr
-                     && g_thumbnailViewBaseSetAssetName != nullptr
-                     && g_thumbnailViewBaseType != nullptr,
+                 g_commonCostumeThumbnailType != nullptr,
                  g_resourcesFindObjectsOfTypeAll != nullptr);
             LogF("Mod menu: full-screen symbols fields=%d/%d/%d/%d/%d "
                  "types=%d/%d/%d/%d/%d methods=%d/%d/%d/%d/%d/%d/%d/%d/%d/%d/%d/%d.",
