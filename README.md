@@ -85,6 +85,8 @@ SHA-256：221760876D257C45B37B22C10390BF9DCD6E197050E4D7BA0F4F3CBDD4377864
 - 新固定行、服装 Master 名称、官方服装缩略图和发型 Master 名称已由截图确认；发型官方预览图直连路径待复验；
 - Runtime 写回、开关视觉校正和标准替换热开关主链均已由实机确认；当前已撤回即时颜色实验，
   保留切页恢复的已知缺陷；
+- 底栏星形分隔与橙条长度两个 UI 缺陷已实机确认修复（2026-08-02），**未解的只剩热开关后
+  直接回主页颜色错误**，切换一次页面即恢复；
 - 三种幂等导航分支已由上一部署版日志确认；最新的 Reload 后菜单入口缓存失效补丁已部署，仍需复验；
 - 返回主页、重登、不同分辨率和长期重复打开的完整生命周期矩阵尚未验收。
 - 当前源码已补充 PID/进程名并清除 Bootstrap 过期文案，但尚待新实机日志确认。
@@ -117,7 +119,7 @@ xinput9_1_0.dll   本项目，负责游戏内管理 UI
 - [`docs/UI_FLOW.md`](docs/UI_FLOW.md)：当前源码流程、最新实机证据、限制和接手步骤；
 - [`docs/SIGNATURE_MATRIX.md`](docs/SIGNATURE_MATRIX.md)：当前 PC 已验证/待验证的 IL2CPP 成员；
 - [`docs/RESEARCH_SOURCES.md`](docs/RESEARCH_SOURCES.md)：metadata、dump 和日志的证据等级；
-- [`docs/OPEN_DEFECTS.md`](docs/OPEN_DEFECTS.md)：三个未解缺陷、已排除的假设与下一步；
+- [`docs/OPEN_DEFECTS.md`](docs/OPEN_DEFECTS.md)：缺陷排查记录；三个里两个已实机关闭，只剩热开关后颜色；
 - [`docs/ENTRY_DLL_EVIDENCE.md`](docs/ENTRY_DLL_EVIDENCE.md)：`xinput9_1_0.dll` 加载依据。
 
 `BORROW_LIBRARY_CASE_STUDY.md` 只是早期 Campus UI/API 背景研究，不属于当前 Mod 管理器的
