@@ -1,206 +1,244 @@
-# M1：独立 DLL、菜单入口与最小 UI 状态
+# 游戏内 Mod 管理页面：当前流程与验证状态
 
-> 最后更新：2026-08-01 12:23
->
-> 本文是当前 UI 实现的接手文档。只把当前 PC 日志和可见实机结果写成“已验证”；规划中
-> 尚未实现的正式 Screen、列表、图标和开关单独列出。
+> 最后更新：2026-08-01
+> 本文描述当前源码和当前部署版。证据状态严格分为“已实机确认”和“已部署待复验”；
+> 编译成功或日志中的局部调用不能替代可见实机结果。
 
 ## 1. 当前结论
 
-M1 的核心链路已经通过实机验证：独立 DLL 加载、Runtime API 握手、主页入口注入、点击
-识别、文本面板创建、Runtime 快照显示以及显隐切换均已成功。
+管理器已经不是主页上的文字探针。当前主路径会借用游戏真实的 `SettingWindow` /
+`SettingTopScreen`，把目标实例重构为完整的“Mod 管理”页面，并保留游戏自己的返回栈、
+标题、滚动区、底部分页和开关组件。
 
-当前 UI 仍是覆盖在主页菜单上的验证面板，不是最终管理器 Screen。它用于证明游戏 UI
-调用层和 Runtime 数据通路可用，下一阶段必须更换正式容器和列表结构。
+已经由实机截图或同轮日志确认：
 
-## 2. 已验证版本
+- `xinput9_1_0.dll` 自动加载，并与 `xinput1_3.dll` 的 Runtime API v1 握手；
+- 主页菜单显示“Mod 管理”入口，点击保留原生动画；
+- 页面标题、服装/发型分页、两个 `ScrollRect` 和原生 `SwitchButton` 可用；
+- 每个 Mod 使用固定的“官方预览 / Mod 名称 / 游戏内选择目标 / 开关”行结构；
+- 三个服装 Mod 的 Master 名称和官方服装缩略图可见；
+- 发型资源键归一化后命中“月村手毬 · 公主皇冠”；
+- 开关写回 Manifest，并更新 Runtime 当前会话；
+- 原生开关在输入回调后发生二次反转的问题已经通过帧末校正确认修复；
+- 标准服装替换可以在当前会话热关闭和热开启；
+- Mod 页再次点 Mod 管理、系统设置页进入 Mod 管理、Mod 页进入系统设置三条导航分支
+  已在上一部署版日志中执行成功。
 
-```text
-入口 DLL：xinput9_1_0.dll
-构建时间：2026-08-01 12:21:11
-大小：196608 字节
-SHA-256：4AEFBEE12BC11509ACCFF62BA660D387AD395FA947B69AD0D9ECA19E82F7DBD5
-日志：D:\Games\gakumas\gakumas-local\mod-manager.log
-```
+当前最后三项修复已经编译，但尚未由用户重新启动游戏复验：
 
-实机可见结果：
+1. `SettingTopScreen.Reload()` 复用同一个 `MenuView` 地址时，主动失效入口注入缓存，避免
+   从 Mod 管理返回系统设置后菜单中缺少“Mod 管理”；
+2. `Renderer.set_sharedMaterials` / `set_materials` 或底层 `SetMaterialArray_Injected` 原始
+   写入完成后，按可逆注册表恢复完整 Mod 材质数组，同时保留 Renderer 现有的每材质
+   `MaterialPropertyBlock`；
+3. 两栏 Mod 页直接设置 `SelectedBarRect.sizeDelta.x`，避免橙条继续按三栏比例绘制。
 
-- 主页菜单副按钮区域出现“Mod 管理”；
-- 点击后在菜单中央显示“共 3 个 Mod”和三条 Mod 状态；
-- 再次点击隐藏，再次点击重新显示；
-- 游戏没有卡死或崩溃；
-- 按钮保留游戏原有按压动画。
+所以当前结论是：**完整页面和热开关主链已跑通，但最新菜单缓存、材质数组恢复、两栏橙条
+修复以及完整生命周期矩阵仍待实机验收，MVP 尚未完成。**
 
-## 3. 最新日志证据
+## 2. 构建与部署基线
 
-### 3.1 符号和字段解析
-
-```text
-12:21:53.962 resolved commonView=1 subButtons=1 button=1 text=1
-               getSubButton=1 customText=1 clone=1 transform=1 parent=1
-               canvas=1 gameObject=1 setActive=1 sizeDelta=1 anchoredPos=1
-               anchors=1/1 pivot=1 scale=1 sibling=1
-12:21:53.962 field offsets commonView=0x58 subButtons=0x50 button=0x38 text=0x48
-```
-
-这些值与当前 PC 实际调用结果一致，当前构建不再存在 11:37 的字段未赋值回归。
-
-### 3.2 入口注入
+当前游戏目录中的管理器：
 
 ```text
-12:23:06.869 step 2 view=MenuView dictionary=SerializableDictionary`2
-12:23:06.871 step 3 template=MenuSubButtonView
-12:23:06.871 canvas=CampusCanvas transform=RectTransform
-12:23:06.873 step 6 clone=MenuSubButtonView
-12:23:06.873 step 7 button=CampusButton
-12:23:06.873 entry injected into MenuView
-12:23:06.900 OnAfterInitialize on OutGameMenuPresenter
+D:\Games\gakumas\xinput9_1_0.dll
+大小：270848 字节
+SHA-256：DBAE909DEA768F74C13D51944649554E75F28B6AD517EFF0A9E4912A350766DC
+状态：已部署，最新入口缓存修复待实机复验
 ```
 
-### 3.3 点击与面板生命周期
+当前游戏目录中的 Runtime：
 
 ```text
-12:23:07.646 entry pressed
-12:23:07.647 panel created (MenuSubButtonView), object=GameObject
-12:23:10.079 entry pressed
-12:23:10.081 panel hidden
-12:23:10.580 entry pressed
-12:23:10.581 panel shown
+D:\Games\gakumas\xinput1_3.dll
+大小：571904 字节
+SHA-256：D262698D56293E624AF3613EB00F9ECD010C2893DD3F77B1FA0E2D6C9D7D1CE4
+状态：已部署；底层材质钩子启动旁路、原生两参数 ABI 和已登记 Renderer 筛选待实机复验
 ```
 
-日志和截图共同证明对象不是“只创建未显示”，而是实际可见并能切换显隐。
+联合替换前的备份：
 
-### 3.4 当前日志中的两个已知歧义
+```text
+D:\Games\gakumas\codex-backups\20260801-212145-menu-entry-mpb-refresh
+```
 
-- `PluginMain.cpp` 仍输出 `UI hook is intentionally disabled`，但同一成功分支随后实际调用
-  `StartCampusUiProbe()`；这是过期文案，不代表 UI 被禁用；
-- 同一日志中出现了两组 `xinput9_1_0.dll loaded`，其中一组成功连接 Runtime，另一组最终
-  超时。当前日志没有 PID/进程名，尚不能确认是启动链中的多个进程还是多个模块实例。
+历史可复现基线：
 
-判断当前 UI 是否启用，应以同一时间段后的 `hooks installed`、`entry injected` 和
-`panel created` 为准。下一次代码清理应修正文案，并给每条日志增加 PID/进程名。
+| 时间/构建 | 已确认结果 | 备注 |
+|---|---|---|
+| 12:23，`4AEF...F7DBD5` | 入口、点击、三条 Runtime 文本和显隐 | 仅 M1 文字探针，不是当前 UI |
+| 18:20–18:21，`2217...77864` | 完整 Setting 页面、分页、滚动、开关写回 | 暴露重复导航、排序和行结构问题 |
+| 后续部署版 | 固定行、Master 名称、服装缩略图、发型名称、开关帧末校正 | 截图与日志已确认 |
+| 21:13–21:14 上一部署版 | 三种幂等导航分支执行成功 | Reload 后同地址菜单入口缓存缺陷被复现 |
+| 当前部署版 | 入口缓存失效 + 热开启材质数组恢复 | 已部署，启动卡住修正版待实机复验 |
 
-## 4. 当前源码流程
+## 3. 当前源码流程
 
-入口文件：`src/CampusUiProbe.cpp`。
+入口实现：`src/CampusUiProbe.cpp`。
 
 ```text
 PluginMain.BootstrapThread
-  → RuntimeClient.Connect / IsReady
-  → Runtime API v1 获取一次 1451 字节快照
-  → StartCampusUiProbe
+  → RuntimeClient.Connect / GetModsJson
+  → Runtime API v1 就绪后启动 UI Probe
   → ProbeThread 等待 GameAssembly.dll
-  → UnityResolve 初始化并附加线程
-  → 精确解析字段、方法和 Unity UI API
+  → UnityResolve 初始化并 attach 当前线程
+  → 解析当前 PC metadata 成员和 Unity UI 方法
   → Hook MenuPresenter.SetEvent / OnAfterInitialize
   → Hook CampusButtonBase.OnClicked
-
-进入主页菜单
-  → SetEventHook
-  → EnsureEntry 读取 MenuPresenter._commonView
-  → MenuView.GetSubButton(ClearCache) 取得模板
-  → Object.Internal_CloneSingleWithParent 克隆入口
-  → 读取克隆体 MenuButtonViewBase._button
-  → SetCustomText("Mod 管理")
-
-点击入口
-  → PressHook 按 CampusButton 对象地址识别自定义入口
-  → TogglePanel
-  → 首次点击克隆第二个 MenuSubButtonView 作为文本面板
-  → 设置根节点与文字节点 RectTransform
-  → SetCustomText 写入 Runtime 快照摘要
-  → 后续点击调用 GameObject.SetActive 切换显隐
+  → Hook EventSystem.Update
 ```
 
-Runtime JSON 在工作线程解析；Unity 对象的克隆、文字设置和 RectTransform 操作发生在游戏
-主线程的点击回调中。
+### 3.1 菜单入口
 
-## 5. 关键安全决策
+```text
+MenuPresenter.SetEvent
+  → EnsureEntry 读取 MenuPresenter._commonView
+  → MenuView.GetSubButton(ClearCache) 取得副按钮模板
+  → Internal_CloneSingleWithParent 克隆入口
+  → 读取克隆体 MenuButtonViewBase._button
+  → SetCustomText("Mod 管理")
+  → 完整成功后把当前 MenuView 记入 g_injectedViews
+```
 
-### 5.1 不写 `_subButtons` 字典
+`_subButtons` 的键是 `MenuButtonSerializeType` 对象，不是整数 `MenuButtonType`。当前实现只读
+该字典，不写入新键；入口由克隆按钮的对象地址识别。
 
-`_subButtons` 的键是 `MenuButtonSerializeType` 对象，不是整数 `MenuButtonType`。当前实现
-只读取字典用于验证，不插入新键。入口通过克隆的 `CampusButton` 对象地址识别。
+### 3.2 从普通页面进入 Mod 管理
 
-### 5.2 消费自定义入口点击
+```text
+PressHook 识别 g_modButton
+  → g_modScreenPending = true
+  → MenuPresenter.set_SelectedButtonType(Setting)
+  → OutGameMenuPresenter.OnSelected()
+  → 游戏创建 SettingWindow / SettingTopScreen
+  → EventSystem.UpdateHook 查找已初始化的 Setting CampusSimpleTab
+  → 只接管第一页为 PreferenceTabPage 的新实例
+  → ComposeModScreen
+```
 
-入口模板来自 `MenuButtonType.ClearCache`。当 `PressHook` 识别到自定义按钮时，处理完面板
-后直接返回，不再调用原始 `CampusButtonBase.OnClicked`，避免触发模板的清缓存行为。
+`SettingTopScreenPresenter.SetEvent()` Hook 仍是快速路径，但当前 PC 的真实创建流程会绕过或
+内联它，因此 `EventSystem.Update()` 是必要的主线程兜底。
 
-### 5.3 只有完整成功才登记 View
+### 3.3 页面组合
 
-`g_injectedViews` 只在克隆和 `_button` 读取全部成功后登记。失败不会永久阻止同一 View
-重试；克隆体缺少按钮时会被禁用，并停止本次会话继续注入。
+```text
+GetModsJson
+  → RuntimeModSnapshot
+  → ModPresentationModel（稳定 modId、分类、冲突与玩家文案）
+  → 读取 Costume / CostumeHead / Character Master
+  → 标题改为“Mod 管理”
+  → CampusSimpleTab 改为“服装 / 发型”，隐藏第三页
+  → 取得两页 ScrollRect.content
+  → 复制设置页原生开关行，生成固定 Mod Cell
+  → 服装调用官方 CostumeThumbnail 组件
+  → 发型调用 CostumeHead.GetThumbAssetName + ThumbnailViewBase.Set
+  → 保存活动 CampusSimpleTab 身份和各开关的 modId 绑定
+```
 
-### 5.4 失效安全
+发型名称已经实机命中。日志也确认 `img_cos_costume_head_ttmr-hair-0002_head` 已交给官方
+缩略图组件；最终预览图在当前页面可见仍需单独截图验收，因此文档不把它写成已完成。
 
-- 必需类、字段、方法或偏移缺失时不安装 UI Hook；
-- 入口创建和面板切换有 SEH 边界；
-- UI 失败不修改 Runtime 的 AssetBundle 替换状态；
-- 不自动启动、关闭或控制游戏。
+### 3.4 Mod 开关
 
-## 6. 当前面板的明确限制
+```text
+PressHook 识别克隆行内部 CampusButton
+  → 按稳定 modId 调用 RuntimeClient.SetModEnabled
+  → Runtime 检查同目标冲突
+  → 更新当前会话有效 replacement map
+  → 原子写回 mod.json 的 enabled
+  → 标准 SkinnedMeshRenderer 规则恢复或重应用当前实例与缓存 Prefab
+  → 管理器重读 Runtime 快照
+  → 重建当前页文本并校正所有受影响开关
+```
 
-- 面板本质仍是放大的 `MenuSubButtonView`；
-- 它覆盖在原菜单格子上，文字与原图标发生视觉重叠；
-- 没有独立遮罩、背景、滚动容器和正式关闭按钮；
-- 没有进入游戏 Screen/Sheet 返回栈；
-- 同一入口同时承担“打开”和“隐藏”；
-- 没有正式列表 Cell、服装/发型分页、官方图标和开关；
-- 当前文本在探针启动时生成，不会自动反映页面打开后的外部 Manifest 修改；
-- 启动日志尚未包含 PID，多个加载序列混在同一文件中；
-- Bootstrap 的“UI hook intentionally disabled”文字与当前行为不符；
-- `g_injectedViews` 使用对象地址去重，地址复用只做了保守假设；
-- 尚未验证离开主页后再进入、重登、长时间运行及多种窗口尺寸。
+`EventSystem.UpdateHook` 在调用游戏原始输入处理后执行 `ReconcileToggleVisuals()`，避免
+`SwitchButton` 自己的监听器在插件回调返回后再次反转 ON/OFF 外观。
 
-这些限制意味着 M1 核心验证成功，但不能把当前画面包装成 MVP。
+冲突语义：
 
-## 7. 历史失败路线
+- 启动扫描发现同目标多个 Mod 同时为 ON：Runtime 把该冲突组全部关闭并持久化，页面提示
+  “Mod 冲突……已自动关闭”；
+- 当前会话已有同目标 Mod 为 ON：新 Mod 的开启请求返回 `GMR_E_TARGET_CONFLICT`，旧 Mod
+  保持 ON，新 Mod 保持 OFF，并提示先检查和关闭占用者。
 
-以下路线已经废弃，不应重新接回当前实现：
+Presentation Model 和 Runtime catalog 测试已覆盖这些规则；冲突两条实机交互分支仍需验收。
 
-- 使用 `Time.get_deltaTime` / `CampusActorController.LateUpdate` 每帧搜索 Presenter；
-- 直接调用 `HomeTopScreenPresenter.OpenNoticeSheetAsync`；
-- 借用 `ErrorSheetManager.OpenAsync` 并传入未经验证的托管委托；
-- 把整数 `MenuButtonType` 写入 `MenuButtonSerializeType` 字段或字典；
-- 点击自定义入口后继续转发 ClearCache 模板的原始 `OnClicked`。
+### 3.5 热恢复与即时颜色刷新
 
-历史时间线：
+Runtime 启动时注册全部有效候选，但 AssetBundle 仍懒加载。标准原地替换首次应用时记录
+Renderer 的原 Mesh、材质、骨骼、根骨和已有每材质 `MaterialPropertyBlock`：
 
-- 11:23：旧构建能克隆入口，但 `OpenAsync returned` 没有可见页面证据；
-- 11:37：字段指针未赋值，日志为 `commonView=0 subButtons=0 button=0`；
-- 12:17：字段回归修复，入口和点击成功，面板对象创建但锚点导致不可见；
-- 12:23：补齐锚点、文字区域、缩放和层级后，面板实机可见。
+- OFF：恢复当前场景实例与缓存 Prefab；
+- ON：只对目标服装/发型资源子树重应用，并刷新活动 Animation Rig；
+- 整对象替换和附加式规则：不承诺可逆，继续按资源重新加载降级。
 
-## 8. 尚未完成的验收
+热 ON 后直接返回主页颜色错误、切页面才恢复仍是已知缺陷。当前部署已恢复为 IDA MCP
+调查前的热切换基线；底层材质数组实验钩子及其后续崩溃排查扫描已撤回。
 
-M1 后续生命周期验收：
+> **已证伪**：曾记录的原因「Renderer 现有 PropertyBlock 的旧贴图优先于材质贴图」是错的。
+> 2026-08-02 的互补探针显示游戏在这些场景**从不调用** `Renderer.SetPropertyBlock`，
+> `Material.SetTexture` 也从不写我们的材质。基于该结论的几轮 Runtime 修复改的是一条
+> 从未执行的路径。
 
-1. 离开主页再返回，不重复创建入口；
-2. 连续打开/关闭 20 次，不残留或崩溃；
-3. 登出重新登录后重新绑定新 View；
-4. 16:9、16:10 和窗口模式下均能正确定位；
-5. Runtime API 不存在或版本错误时不显示入口；
-6. 汉化插件安装与否均不影响管理器。
+实机抓到的写入链会在热重应用之后重新赋值材质数组，把带 Mod 贴图的私有材质换掉。
+当前先保留“不崩溃且可热切换，必要时切页刷新”的行为；完整排除过程和下一步见
+[`OPEN_DEFECTS.md`](OPEN_DEFECTS.md)。
 
-MVP 尚需：
+## 4. 三种幂等导航
 
-1. 独立、可关闭且不覆盖原菜单内容的正式管理容器；
-2. 每次打开时刷新 Runtime 快照；
-3. Presentation Model 和服装/发型分栏；
-4. Master 名称解析与官方图标；
-5. 开关写回和重启提示；
-6. 异常、冲突和长列表处理。
+| 当前页面 | 点击 | 预期行为 | 当前证据 |
+|---|---|---|---|
+| Mod 管理 | Mod 管理 | 只关闭菜单层，不重复创建或重构页面 | 21:14 日志确认 |
+| 系统设置 | Mod 管理 | 原位复用当前 `SettingTopScreen` 并组合为 Mod 页面 | 21:13 日志确认 |
+| Mod 管理 | 系统设置 | 调用 `Campus.ICampusScreen.Reload()` 原位恢复干净设置页并关闭菜单 | 21:13 日志确认 |
 
-诊断清理还需：修正 Bootstrap 过期日志文字，并在日志前缀加入 PID/进程名。
+最后一条会销毁并重建 Setting 内容，但游戏可能保留同一个 `MenuView` 地址。上一构建只按地址
+去重，导致新菜单没有重新克隆入口。当前实现会在 Reload 成功后：
 
-## 9. 接手后的第一项开发
+```text
+g_activeModTab = nullptr
+g_toggleBindings.clear()
+g_injectedViews.erase(g_menuViewInstance)
+g_modButton = nullptr
+```
 
-不要继续美化当前放大按钮。下一步应先确定正式容器：
+下一次 `MenuPresenter.SetEvent` 因此能够对同地址 View 重新注入。这个最终分支待实机复验。
 
-1. 复用一个生命周期简单、可关闭的原生 Screen/Sheet 容器，或构建独立 Canvas 子树；
-2. 保留当前已验证的菜单入口和 `CampusButtonBase.OnClicked` 识别链；
-3. 将 `BuildSheetBody()` 拆成 Runtime 快照读取、Presentation Model 和 View 绑定三层；
-4. 先用文本列表完成打开、关闭、返回和刷新，再接官方 Cell 与图标。
+## 5. 关键安全边界
 
-如新容器失败，应回退到当前可见验证面板，而不是恢复 ErrorSheet 或字典插入路线。
+- 所有 Master、Unity UI 和 GameObject 操作只在 Unity 主线程执行；
+- 必需成员缺失时按能力降级，全屏能力失败不删除主页入口；
+- `g_injectedViews` 只在入口克隆和按钮读取完整成功后登记；
+- 页面组合、Reload 和 Runtime 开关有空值检查、compiled-body 检查与 SEH 边界；
+- UI 失败不修改 Runtime 资源状态；Runtime 切换失败保持原状态并返回错误码；
+- 管理器不控制游戏进程，不自动启动或关闭游戏；
+- 不写 `_subButtons` 字典，不把整数写入 `MenuButtonSerializeType`；
+- 不执行克隆模板原来的 ClearCache 点击逻辑。
+
+## 6. 已废弃路线
+
+以下只保留为历史，不得接回 Release 主路径：
+
+- 在主页 Canvas 上放大 `MenuSubButtonView` 作为最终管理面板；
+- `Time.get_deltaTime` / `CampusActorController.LateUpdate` 每帧搜索 Presenter；
+- `HomeTopScreenPresenter.OpenNoticeSheetAsync`；
+- `ErrorSheetManager.OpenAsync` 加未经验证的托管委托；
+- 伪点击真实设置按钮的 `CampusButtonBase.OnClicked`；
+- 把整数 `MenuButtonType` 写入 `_subButtons` 的对象键；
+- 仅靠 `SettingTopScreenPresenter.SetEvent()` 接管页面；
+- 通过启用状态排序列表，导致开关后条目换位。
+
+## 7. 当前待验收项
+
+按优先级执行：
+
+1. 在用户手动启动游戏后，执行 Mod → 设置 → 菜单，确认“Mod 管理”入口仍存在；再执行
+   设置 → Mod、Mod → Mod，确认没有卡住、叠页或错误启动；
+2. 对同一标准服装 Mod 执行 ON → 返回主页、OFF → 返回主页、再 ON → 返回主页，确认 Mesh、
+   材质、骨骼和颜色都即时正确，不需要切换其他游戏页面；
+3. 打开发型页，截图确认“月村手毬 · 公主皇冠”的官方预览图实际可见；
+4. 实机触发启动时冲突组全关，以及运行中新 Mod 被占用者拒绝的两种提示；
+5. 验证返回主页、重登、重复打开、16:9/16:10、空列表、长名称和大量条目；
+6. 完成写入失败、API 不兼容、Manifest 异常和安全 Shutdown 降级测试。
+
+每轮实机测试必须同时记录管理器/Runtime DLL 哈希、日志时间、操作顺序和可见结果。

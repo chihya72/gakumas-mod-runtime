@@ -10,6 +10,7 @@ namespace GakumasModManager {
         bool Connect();
         bool IsReady() const;
         bool GetModsJson(std::string& output) const;
+        GmrResult SetModEnabled(const std::string& modId, bool enabled) const;
         const GmrRuntimeApiV1* Api() const;
 
     private:

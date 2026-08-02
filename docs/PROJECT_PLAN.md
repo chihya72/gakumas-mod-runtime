@@ -1,6 +1,6 @@
 # Gakumas 游戏内 Mod 管理器：完整规划
 
-> 文档状态：M1 独立 DLL、Runtime 握手、主页入口和最小可见文本面板已实机验证；正式管理容器与 M3 列表仍待实现
+> 文档状态：M1 独立 DLL、Runtime 握手和主页入口已验证；真实 `SettingTopScreen` 全屏页、固定 Mod Cell、服装/发型分页、Master 名称、服装官方缩略图、原生开关写回及标准 `SkinnedMeshRenderer` 热开关主链均已实机运行。最新 Reload 入口缓存失效、材质数组写回后的 Mod 材质恢复和两栏橙条修复已完成本地 Release 构建，待实机复验
 > 当前状态与已废弃做法见 `UI_FLOW.md`；调查数据源见 `RESEARCH_SOURCES.md`
 > 建立日期：2026-08-01  
 > 目标平台：学园偶像大师 DMM Windows 版（Unity IL2CPP / x64）  
@@ -11,7 +11,7 @@
 
 ## 1. 项目摘要
 
-本项目为 `gakumas-mod-runtime` 的游戏内管理界面。它不负责制作 Mod，也不直接实现 Mesh、材质或贴图替换；它负责把运行库已经扫描到的 Mod 转换成玩家能理解的列表，并允许玩家修改下一次启动时的启用状态。
+本项目为 `gakumas-mod-runtime` 的游戏内管理界面。它不负责制作 Mod，也不直接实现 Mesh、材质或贴图替换；它负责把运行库已经扫描到的 Mod 转换成玩家能理解的列表，并允许玩家同时修改当前会话与下一次启动的启用状态。
 
 第一版的核心体验是：
 
@@ -19,7 +19,7 @@
 2. 在“服装”和“发型”两个分页中查看 Mod；
 3. 每个 Mod 使用游戏原本的目标服装或发型图标，告诉玩家应在游戏里选择什么；
 4. 玩家使用开关修改 Mod 状态；
-5. 页面明确提示改动将在重启游戏后生效。
+5. 标准服装/发型 Mod 在当前角色上即时开关，同时持久化下次启动状态。
 
 管理器必须使用面向玩家的文字。资源 ID、`source`、`part`、文件路径、优先级和 Renderer 名称等技术字段不出现在普通界面中。
 
@@ -33,8 +33,8 @@
 - `body` Mod 放入“服装”分页，`hair` Mod 放入“发型”分页；
 - 管理入口只在游戏 Master 数据已经加载的主页阶段出现，因此不设计 Master 未加载占位流程；
 - 目标解析失败时，使用 Manifest 原始 `source` 作为文字兜底，单个异常项不能阻断整个页面；
-- 开关只修改下一次启动配置，不承诺在当前进程中热卸载或热恢复；
-- 修改开关后必须显示“重启游戏后生效”；
+- 开关同时修改当前会话和下一次启动配置；标准 `SkinnedMeshRenderer` 规则必须支持当前角色热卸载与热恢复；
+- 整对象替换或附加式规则无法安全逆转时，允许提示重新选择目标或重新进入场景；
 - 正常玩家界面不显示服装 ID、发型资源 ID、替换部位或资源路径；
 - 第一版只管理 `gakumas-mod-runtime` 的 AssetBundle Mod，不管理旧 3DMigoto Mod。
 
@@ -55,7 +55,7 @@
 
 ### 3.2 第一版不做
 
-- 当前进程内热加载、热卸载或热切换 Mesh/材质；
+- 对整对象替换、附加式规则承诺无条件热卸载；
 - 下载、更新、安装、删除或移动 Mod；
 - Mod 市场、联网账号、评分或自动更新；
 - Mod 作者工具和 Manifest 编辑器；
@@ -91,16 +91,16 @@ Mod 管理
 
 [目标官方图标]  Mod 名称                         [开关]
                 在换装中选择：角色名 · 游戏内名称
-                重启后启用 / 重启后停用（仅有改动时）
+                冲突或错误说明（仅有异常时）
 ```
 
-页面底部或顶部显示一次统一提示：
+仅在 Runtime 返回不支持或恢复失败时显示页面级降级说明：
 
 ```text
-设置将在重启游戏后生效
+当前对象未能即时刷新，请重选服装/发型或重新进入场景
 ```
 
-没有待生效改动时不持续占用空间显示该提示。
+普通条目不重复显示该说明。
 
 ### 4.3 卡片显示规则
 
@@ -114,10 +114,9 @@ Mod 管理
 
 按需显示的状态文字：
 
-- `重启后启用`；
-- `重启后停用`；
 - `加载失败`；
-- `与其他 Mod 使用同一目标`；
+- `Mod 冲突：与其他 Mod 使用同一目标，已自动关闭`；
+- `无法开启：已有其他 Mod 开启同一目标，请先检查并关闭它`；
 - `无法识别对应服装`；
 - `配置有误`。
 
@@ -137,12 +136,15 @@ Mod 管理
 - 逻辑类别为 `hair` 的项目进入“发型”；
 - 不支持或无法确认类别的 Manifest 不伪装成正常项目；它只通过页面级异常提示和日志报告。
 
-默认排序：
+默认排序不得因开关状态变化而移动：
 
-1. 当前配置为启用的项目；
-2. 游戏角色顺序；
-3. 游戏 Master 中的目标顺序；
-4. Mod 名称。
+1. 游戏角色顺序；
+2. 游戏 Master 中的目标顺序；
+3. Mod 名称；
+4. 稳定 `modId` 作为最终决胜键。
+
+当前实现已经解析角色与目标 Master 名称，但尚未接入 Master 的显示顺序键，因此暂用
+`Mod 名称 + modId` 的稳定顺序；启用状态不参与排序，开关后条目不会换位。
 
 空状态：
 
@@ -160,13 +162,19 @@ Mod 管理
 
 ### 4.5 多 Mod 冲突
 
-两个启用 Mod 指向同一逻辑目标时，Runtime 仍按既有优先级规则决定实际注册项。管理器不向玩家展示优先级数值，而显示：
+同一逻辑目标是互斥组。启动时若多个 Manifest 同时开启，Runtime 将该冲突组全部关闭并持久化。被自动关闭的条目显示：
 
 ```text
-与“另一个 Mod 名称”使用同一服装
+Mod 冲突：与“另一个 Mod 名称”使用同一服装，已自动关闭
 ```
 
-冲突项允许关闭。第一版不自动修改其他 Mod，也不暗中改变优先级。
+运行中已有一个 Mod 开启时，再开启同目标 Mod 会被拒绝；原 Mod 保持开启，新 Mod 保持关闭并显示：
+
+```text
+无法开启：“已开启的 Mod 名称”已开启同一服装，请先检查并关闭它
+```
+
+玩家必须先关闭原 Mod，之后才能开启新 Mod。普通界面不展示优先级数值。
 
 ## 5. 当前基础与缺口
 
@@ -205,15 +213,29 @@ Mod 管理
 - `GmrGetRuntimeApiV1` 导出和跨 DLL 缓冲区释放函数；
 - Runtime 与管理器握手日志。
 
-2026-08-01 的目标游戏日志已确认管理器读取到 1451 字节快照，并在最小面板显示三条
-Mod 名称、类别和状态。当前剩余缺口是：
+2026-08-01 的目标游戏日志与截图已确认管理器读取快照、组合全屏分页、显示固定 Mod 行、
+解析服装/发型 Master 名称、加载服装官方缩略图，并写回当前会话和 Manifest。当前剩余缺口是：
 
 - `appliedThisSession` 与真实 AssetBundle 应用成功记录的完整对应；
 - Manager/Runtime 共享头文件的单一来源整理；
-- 正式 Presentation Model、分栏、图标和开关绑定；
-- 页面打开时刷新，而不是只在 UI 探针启动时构建文本。
+- 最新 Reload 后同地址 `MenuView` 的入口缓存失效补丁实机复验；
+- 热开启后拦截 `Renderer.set_sharedMaterials` / `set_materials` 并恢复完整 Mod 材质数组的实机复验；
+- 发型 `CostumeHead` 官方预览图在最终行中可见的截图验收；
+- 返回/重登/分辨率和长期重复生命周期验证；
+- 冲突、配置异常、写入失败和大列表的实机覆盖；
+- Manager/Runtime API 头文件的单一共享来源。
 
-Runtime 当前也没有可靠的反向恢复流程。已经被替换的 Unity 对象可能被多个场景或实例引用，因此第一版严格采用重启生效。
+Runtime 已为标准原地替换记录 Renderer 级可逆快照：原 Mesh、共享材质、骨骼名称、根骨名称，以及 Renderer 相对资源根节点的层级深度。关闭时同时扫描当前场景和已缓存 Prefab，按 Mod Mesh/私有材质引用匹配并恢复；开启时只对对应服装/发型子树重应用，避免误改整名角色的其他 Renderer。整对象替换和附加式规则暂不进入该路径。
+
+热开启在当前角色已完成动画初始化后发生，因此 Runtime 还会缓存活动 `CampusActorAnimationRig` 上下文；若本次重应用创建了新的动态骨或链，则把它们补入当前 `initializeData` 并重新调用原始 `RegisterBones`。缓存 Prefab 不匹配活动 Rig，不执行该步骤。
+
+材质热恢复不能对所有槽直接调用 `SetPropertyBlock(null, slot)`，因为游戏自己的肤色、遮罩和光照参数也保存在每材质 `MaterialPropertyBlock` 中。Runtime 在合并 Mod 贴图前深拷贝游戏已有 Block；OFF 时恢复这些快照，只清除 Runtime 为原本空槽创建的 Block。
+
+活跃 `SkinnedMeshRenderer` 在运行中更换 Mesh/骨骼后还持有内部渲染缓存；Runtime 会重置
+Bounds、保持原 enabled 状态刷新 Renderer，并只对活动 Rig 的目标节点执行一次停用/启用。
+热重应用后游戏会把材质数组换回原始值，所以用户必须切换页面才恢复正确颜色。IDA MCP 后的
+底层写回钩子实验导致加载卡住或点击崩溃，已经撤回。当前部署恢复为调查前的同步热恢复/热重应用
+路径；管理器全屏页面、橙条、分隔星、入口与导航修复全部保留。
 
 ## 6. 总体架构
 
@@ -257,7 +279,8 @@ void GkmmShutdown();
 
 管理器入口固定为 `xinput9_1_0.dll`，不占用 `version.dll` 或 `xinput1_3.dll`，也不要求安装汉化插件。
 
-当前 `RuntimeClient.cpp` 仍含历史口误产生的 `xinput3.dll` 兜底候选。它不是受支持的部署名，也没有参与本次成功握手；后续清理应删除该候选，只保留 `xinput1_3.dll`。
+`RuntimeClient.cpp` 已删除历史口误产生的 `xinput3.dll` 兜底候选，只接受已经验证的
+`xinput1_3.dll`。该清理已通过本地 Release 构建，待下一轮实机握手复验。
 
 入口加载、Runtime 握手和停止状态写入 `gakumas-local\mod-manager.log`；日志同时使用 `OutputDebugStringA` 输出，便于用 DebugView 观察。
 
@@ -346,7 +369,7 @@ void GkmmShutdown();
 - 合并 Runtime 状态与 Master 解析结果；
 - 生成玩家可见标题、副标题、图标和状态文案；
 - 排序和分页；
-- 管理待重启状态；
+- 管理热切换、自动互斥和错误状态；
 - 不向 View 暴露文件路径或原始 Manifest 结构。
 
 ## 8. Runtime API v1 规划
@@ -355,7 +378,7 @@ void GkmmShutdown();
 
 Mod 快照采用 UTF-8 JSON，而不是跨 DLL 传递 C++ 容器。Runtime 分配返回缓冲区，并提供配套释放函数，避免 CRT 堆边界问题。
 
-建议的 Runtime API：
+当前 Runtime API：
 
 ```cpp
 struct GmrRuntimeApiV1 {
@@ -364,8 +387,8 @@ struct GmrRuntimeApiV1 {
 
     GmrResult (*getModsJson)(GmrOwnedBuffer* output);
     void (*freeBuffer)(void* data);
-    GmrResult (*setModEnabled)(const char* modIdUtf8, bool enabled);
-    void (*writeLog)(GmrLogLevel level, const char* component, const char* messageUtf8);
+    GmrResult (*setModEnabled)(const char* modIdUtf8, uint8_t enabled);
+    void (*writeLog)(uint32_t level, const char* component, const char* messageUtf8);
 };
 ```
 
@@ -408,9 +431,9 @@ extern "C" GmrResult GmrGetRuntimeApiV1(GmrRuntimeApiV1* output);
 字段定义：
 
 - `configuredEnabled`：当前 `mod.json` 中保存的期望状态；
-- `registeredThisSession`：本次启动时是否进入 replacement map；
-- `appliedThisSession`：目标资源是否已被请求且替换成功；
-- `restartRequired`：期望状态是否与本次启动状态不同；
+- `registeredThisSession`：当前会话是否进入有效 replacement map；热开关成功后同步变化；
+- `appliedThisSession`：目标资源是否已被请求且替换成功；当前仍需补齐所有真实应用点；
+- `restartRequired`：热路径无法同步时的兼容字段；标准热开关成功后为 `false`；
 - `manifestState`：Manifest 是否可用；
 - `runtimeState`：Runtime 注册或应用结果；
 - `target`：供管理器解析游戏显示信息的内部目标；
@@ -418,9 +441,10 @@ extern "C" GmrResult GmrGetRuntimeApiV1(GmrRuntimeApiV1* output);
 
 ### 8.3 错误码
 
-至少定义：
+当前定义：
 
 - `GMR_OK`；
+- `GMR_E_INVALID_ARGUMENT`；
 - `GMR_E_API_VERSION`；
 - `GMR_E_NOT_INITIALIZED`；
 - `GMR_E_MOD_NOT_FOUND`；
@@ -428,8 +452,8 @@ extern "C" GmrResult GmrGetRuntimeApiV1(GmrRuntimeApiV1* output);
 - `GMR_E_ACCESS_DENIED`；
 - `GMR_E_IO`；
 - `GMR_E_CONCURRENT_CHANGE`；
-- `GMR_E_HOOK_FAILED`；
-- `GMR_E_INTERNAL`。
+- `GMR_E_INTERNAL`；
+- `GMR_E_TARGET_CONFLICT`。
 
 玩家界面只显示经过映射的简短文案，详细错误码和路径进入日志。
 
@@ -570,24 +594,37 @@ Character.Id -> Character 显示信息
 
 不在第一版引入 ImGui 覆盖层。ImGui 会产生输入、缩放、视觉一致性和移动端式界面适配问题，也无法自然复用官方服装格子。
 
-当前 M1 已验证的自建面板是放大的 `MenuSubButtonView`，只用于证明入口、点击、Runtime
-快照和 RectTransform 调用链。它与原菜单内容重叠，不是本节所要求的最终页面。
+M1 早期验证的放大 `MenuSubButtonView` 只用于证明入口、点击、Runtime 快照和
+RectTransform 调用链，已经退出当前主路径。当前页面使用游戏真实设置窗口，不再覆盖主页。
+
+当前源码已经停止创建主页 Canvas 面板。Mod 入口写入当前菜单 Presenter 的
+`SelectedButtonType=Setting` 并调用 `OutGameMenuPresenter.OnSelected()`，让游戏自行创建
+`SettingWindow` / `SettingTopScreen` 并维护返回栈；仅对 pending 的该次设置
+页面，在主线程 `EventSystem.Update()` 中发现第一页为 `PreferenceTabPage` 的活跃 Tab 后，
+重构标题、分页、滚动内容和开关行。17:54 的首次部署确认旧解析把
+`CampusSimpleTab`、`SwitchButton` 和 `OverlayTitleView` 错误限定在单一程序集，因启动检查失败
+连带禁用了入口。当前实现已改为跨程序集解析，并把入口 Hook 与全屏能力检查解耦；修正版已
+于 18:20–18:21 取得全屏页、分页和开关写回截图。后续部署又实机确认固定行、Master 名称、
+服装缩略图、稳定排序和开关帧末校正。21:13–21:14 日志确认 Mod→Mod、设置→Mod、Mod→设置
+三种幂等导航分支；同轮复现 Reload 后复用 `MenuView` 地址造成入口丢失。当前部署版已在
+Reload 时失效该 View 的注入缓存，待实机复验。
 
 ### 11.2 接入调查顺序
 
 1. **已完成：**确认 `OutGameMenuPresenter`、`MenuPresenter.SetEvent` 和 `MenuView`；
 2. **已完成：**克隆副按钮并通过 `CampusButtonBase.OnClicked` 识别自定义入口；
 3. **已完成：**创建可见文本面板并显示 Runtime 快照；
-4. 验证返回主页、重登和重复进入不会重复创建；
-5. 选择正式独立容器，完成关闭/返回和页面层级；
-6. 验证官方服装列表 Cell 的 Model/View/Presenter 绑定；
-7. 验证发型格子的绑定；
-8. 接 Presentation Model、分页、刷新和开关写入。
+4. **已实机验证：**通过真实设置导航创建全屏页面，复用标题、返回栈、Tab 和 Scroll；
+5. **已实机验证：**绑定服装/发型分页、临时设置行和 Runtime 开关写回；
+6. **已实机验证：**稳定排序、Master 目标文案、固定图标位、服装官方缩略图和三种幂等导航分支；
+7. **已部署待复验：**Reload 后菜单入口缓存失效，以及热开启后的即时颜色刷新；
+8. 验证返回主页、重登、重复进入和随后原设置页不会被污染；
+9. 验证发型官方预览图最终可见；需要时再研究完整专用 Cell。
 
 ### 11.3 UI 生命周期
 
-- 主菜单首次创建时注入入口，并用实例标记防止重复注入；
-- 当前探针在启动时构建一次快照文本；正式页面必须改为每次打开时拉取 Runtime 快照；
+- 主菜单创建时注入入口，并用实例标记防止重复注入；设置页 Reload 会主动失效当前 View 的标记，以允许同地址新生命周期重新注入；
+- 当前源码在每次全屏页面组合和开关写回成功后拉取 Runtime 快照；该语义已由 18:20–18:21 实机日志和截图确认；
 - 在游戏主线程解析 Master、创建和绑定 Unity 对象；
 - 关闭页面时释放管理器持有的事件订阅、GCHandle 和临时列表；
 - 返回标题或登出时清空 Master 索引；
@@ -597,16 +634,17 @@ Character.Id -> Character 显示信息
 
 ### 12.1 状态模型
 
-页面开关绑定 `configuredEnabled`，而不是假装即时改变本次启动状态。
+页面开关绑定 `configuredEnabled`，成功写入时也同步更新当前 Runtime 会话。
 
-| 本次启动 | 当前配置 | 玩家显示 |
+| 状态 | 开关 | 玩家显示 |
 |---|---|---|
-| 开 | 开 | 开启，无待处理状态 |
-| 开 | 关 | 开关关闭，显示“重启后停用” |
-| 关 | 开 | 开关开启，显示“重启后启用” |
-| 关 | 关 | 关闭，无待处理状态 |
+| 当前会话启用 | 开 | 普通目标说明 |
+| 当前会话关闭 | 关 | 普通目标说明 |
+| 启动时同目标多项冲突 | 关 | `Mod 冲突：与“Mod 名称”使用同一服装/发型，已自动关闭` |
+| 运行中开启被占用目标 | 关 | `无法开启：“Mod 名称”已开启同一服装/发型，请先检查并关闭它` |
+| 配置无效 | 禁用 | `配置有误` |
 
-AssetBundle 是懒加载的，因此“本次尚未请求目标资源”不等于“Mod 未加载”。普通界面使用“开启/关闭”，只在明确失败时显示“加载失败”。详细的 Registered/Applied 状态留在日志和内部快照。
+所有有效替换规则在启动时注册为候选，AssetBundle 仍按实际资源请求懒加载。开关会重建有效 replacement map，后续加载立即使用新状态。标准原地替换在首次应用前保存可逆 Renderer 快照；OFF 恢复当前实例和缓存 Prefab 的 Mesh、材质、骨骼与根骨，已注册的动态骨基础设施保留为不可见休眠状态，避免破坏游戏初始化列表；ON 对已恢复的资源子树和当前实例重新应用并复用这些动态骨。详细的 Registered/Applied/Hot-restored 状态留在日志和内部快照。整对象替换和附加式规则仍以重新加载资源作为降级路径。
 
 ### 12.2 写入流程
 
@@ -618,15 +656,17 @@ AssetBundle 是懒加载的，因此“本次尚未请求目标资源”不等�
 4. 只修改顶层 `enabled`；
 5. 在同一目录写入临时文件；
 6. Flush 后使用 Windows 原子替换；
-7. 成功后更新 Runtime 目录中的 `configuredEnabled` 与 `restartRequired`；
-8. 不重建 replacement map，不卸载 Bundle，不修改 `registeredThisSession`；
-9. 失败时保留原文件和原内存状态，并返回明确错误码。
+7. 开启时查找同一 `targetKind + targetKey` 的已开启项；若存在则保持双方状态不变并返回 `GMR_E_TARGET_CONFLICT`；
+8. 无冲突时更新当前会话候选状态并重建有效 replacement map；
+9. 原子写回目标 Manifest，成功后更新 `configuredEnabled` 与 `registeredThisSession`；
+10. 启动扫描发现同组多项开启时，以组为单位全部关闭；任一步失败时尽力回滚整组会话状态与 Manifest；
+11. 其他失败同样保留原状态并返回明确错误码。
 
 为检测外部编辑，目录记录保存 Manifest 的最后写入时间与内容摘要。写入前不一致时重新解析；如果目标身份改变则返回 `GMR_E_CONCURRENT_CHANGE`。
 
 ### 12.3 点击反馈
 
-- 写入成功：立即更新开关和待重启文案；
+- 写入成功：立即更新开关和当前会话资源；仅在热恢复不支持或失败时显示重新加载提示；
 - 写入失败：恢复开关，并显示“保存失败，请查看日志”；
 - 快速连续点击：写入进行中时临时禁用该开关，防止并发写同一 Manifest；
 - 页面关闭后重新打开：以 Runtime 最新快照为准。
@@ -727,14 +767,20 @@ gakumas-in-game-mod-manager\
 │     ├─ CampusUiProbe.hpp
 │     ├─ gmr_runtime_api.h
 │     ├─ ManagerLog.hpp
+│     ├─ ModPresentationModel.hpp
+│     ├─ RuntimeModSnapshot.hpp
 │     └─ RuntimeClient.hpp
 ├─ src\
 │  ├─ CampusUiProbe.cpp
+│  ├─ ModPresentationModel.cpp
 │  ├─ ManagerLog.cpp
 │  ├─ PluginMain.cpp
 │  ├─ RuntimeClient.cpp
+│  ├─ RuntimeModSnapshot.cpp
 │  ├─ XInputProxy.cpp
 │  └─ xinput9_1_0.def
+├─ tests\
+│  └─ ModPresentationModelTests.cpp
 ├─ tools\
 │  ├─ inspector_index.py
 │  └─ metadata_index.py
@@ -742,8 +788,8 @@ gakumas-in-game-mod-manager\
 └─ .gitignore
 ```
 
-`TargetResolver`、正式 `GameUiBridge`、Presentation Model 和单元测试仍是下一阶段要拆出的
-模块，不应继续把所有业务堆进 `CampusUiProbe.cpp`。
+Runtime 快照解析和 Presentation Model 已从 `CampusUiProbe.cpp` 拆出，并有独立测试覆盖；
+`TargetResolver` 和正式 `GameUiBridge` 仍是下一阶段要拆出的模块，不应再把业务逻辑堆回探针。
 
 技术选型与现有 Runtime 对齐：
 
@@ -796,17 +842,27 @@ gakumas-in-game-mod-manager\
 - 验证重复进入主页、返回、重登和退出；
 - 截图记录不同分辨率结果。
 
-当前结论：M1 的核心技术风险已经解除；当前验证面板不是正式 UI，后续不应继续把放大的
-`MenuSubButtonView` 扩展成最终列表。
+当前结论：M1 的核心技术风险已经解除；12:23 的历史验证面板不是正式 UI，已经停止维护，
+不得把放大的 `MenuSubButtonView` 重新扩展成最终列表。
+
+当前源码已按此结论撤出主页文字/卡片面板主路径：自定义入口只驱动 Presenter 的原生设置
+选择分支，随后由 `EventSystem.Update` 主线程 Hook 发现已初始化的真实设置 Tab 并重构。
+18:12 实机确认 Presenter 导航可以打开原设置页，同时证明 `SettingTopScreenPresenter.SetEvent`
+没有经过现有 Hook，不能作为唯一接管点。首次部署还发现公共 UI 类型的
+程序集假设错误并导致入口消失；现已改成跨程序集解析，且全屏符号失败只降级页面、不会再
+移除入口。18:20–18:21 已确认修正版全屏组合与开关写回；重复点击误进设置页是旧 Tab 被轮询
+误认的新竞态，当前源码以活动 Mod Tab 身份和 pending 去重保护修复，仍需实机确认返回和原设置页隔离。
 
 退出条件：入口和最小数据面板已能打开、隐藏和重新显示；完成返回主页、重登和分辨率
 补测后关闭 M1。
 
 ### M2：Runtime 目录与 API v1
 
-当前状态：Runtime 目录、启停写回、API v1 导出、Manager 握手、快照解析和最小文本展示
-已完成实机验证；正式 Presentation Model、页面打开时刷新、共享 SDK 整理和 UI 开关绑定
-仍待完成。`appliedThisSession` 仍需接入真实 AssetBundle 应用成功记录。
+当前状态：Runtime 目录、启停写回、API v1 导出、Manager 握手、独立快照解析、Presentation
+Model、稳定 `modId`、分类、全屏页面、原生开关写回和标准替换热开关主链均已进入实机。
+Master 名称、固定图标区、服装官方缩略图、稳定排序和三种幂等导航也已有截图或日志。
+冲突模型已有本地测试；最新入口缓存与即时 MPB 补丁已部署待复验。共享 SDK 整理和
+`appliedThisSession` 真实记录仍待完成。
 
 已完成：
 
@@ -834,12 +890,17 @@ gakumas-in-game-mod-manager\
 - 实现独立管理器 DLL 的注入握手与安全卸载；
 - 补充并发保护和单元测试。
 
-下一步：把 `BuildSheetBody()` 拆成快照读取、Presentation Model 和 View 绑定；正式页面每次
-打开重新取快照，并为后续开关写回保留稳定的 `modId`，不再只生成一次性字符串。
+当前切片：原 `BuildSheetBody()` 已拆为 Runtime 快照解析和 Presentation Model；设置模板页在
+打开和写回后重取快照，模型保留稳定 `modId`。`masterKey` 已用于 Costume/CostumeHead/
+Character Master 文案；固定 Cell 和服装缩略图已经实机可见。发型自身缩略图资源已有日志，
+但仍需最终截图确认；只有当前固定 Cell 无法满足滚动或布局验收时才升级为专用可复用 Cell。
 
 退出条件：不依赖游戏 UI 的测试程序可以列出所有 Mod、切换 enabled，并验证重启前后状态语义。
 
 ### M3：服装分页 MVP
+
+当前状态：分页、三条服装固定行、目标 Master 名称、官方服装缩略图、稳定排序和开关写回
+已经实机确认。标准服装热开关已生效；即时颜色提交的最后修复待复验。
 
 任务：
 
@@ -848,12 +909,16 @@ gakumas-in-game-mod-manager\
 - 实现 body source 到 Costume 的映射；
 - 绑定官方服装图标；
 - 实现服装列表、排序、空状态和开关；
-- 实现待重启提示；
+- 对不支持热恢复或热恢复失败的规则显示重新加载/重启降级提示；
 - 实现解析失败兜底。
 
 退出条件：现有三个 release 服装 Mod 均能显示正确目标图标与游戏内名称，启停写入正确。
 
 ### M4：发型分页
+
+当前状态：发型分页、发型行、资源键归一化和“月村手毬 · 公主皇冠”名称已经实机确认；
+`CostumeHead.GetThumbAssetName()` 已在日志中返回官方资源并交给缩略图组件，最终图像可见
+和真实 hair Mod 热切换仍待验收。
 
 任务：
 
@@ -863,7 +928,7 @@ gakumas-in-game-mod-manager\
 - 加入发型分页计数和排序；
 - 使用真实 hair Mod 完成实机验证。
 
-退出条件：至少一个真实 hair Mod 能正确显示目标、图标和待重启状态。
+退出条件：至少一个真实 hair Mod 能正确显示目标、图标和热切换状态。
 
 ### M5：异常、冲突与兼容
 
@@ -959,8 +1024,8 @@ gakumas-in-game-mod-manager\
 7. 正常项只展示玩家可理解的名称，不展示技术 ID；
 8. 解析失败只影响单项，并以原始 source 兜底；
 9. 开关能可靠写回 `enabled`；
-10. 当前进程不尝试热卸载，改动明确提示重启生效；
-11. 重启后 Runtime 实际状态与上次选择一致；
+10. 标准服装/发型 Mod 在当前角色上能可靠热开启和热关闭；
+11. 重启后 Runtime 实际状态仍与上次选择一致；
 12. 冲突、文件损坏和写入失败不会导致页面或游戏崩溃；
 13. 游戏 UI 签名不兼容时管理器安全关闭，Runtime 仍正常工作；
 14. 发布包不含任何提取的游戏资源。
@@ -973,7 +1038,7 @@ gakumas-in-game-mod-manager\
 | 原生 Cell 构造依赖复杂 | 图标不能直接显示 | 先复用完整 Presenter；再退到已验证图标加载方法 |
 | hair 资源与 CostumeHead 不是一对一 | 发型名称或图标匹配错误 | 通过 hairAssetId、Costume 引用和官方格子三重验证 |
 | Runtime 只记录启用项 | 禁用 Mod 无法列出 | 新建完整目录模型，不再从 replacement map 反推 |
-| 热关闭后对象仍被引用 | 黑屏或崩溃 | 第一版只写配置，重启生效 |
+| 热关闭后对象仍被引用 | 外观残留、黑屏或崩溃 | 保存 Renderer 原状态，按 Mod 资源引用恢复场景实例与缓存 Prefab；不支持的规则降级为重新加载 |
 | Runtime 与管理器各自管理 Hook | 卸载或目标冲突 | 明确 Hook 目标边界，管理器只负责 UI，Runtime 只负责资源替换 |
 | Manifest 写入中断 | Mod 配置损坏 | 同目录临时文件、Flush、原子替换 |
 | 玩家手动编辑 Manifest | 覆盖外部修改 | 时间戳/摘要检测，冲突时重新解析或拒绝写入 |
@@ -984,12 +1049,11 @@ gakumas-in-game-mod-manager\
 
 以下是需要通过实机和 IL2CPP metadata 确认的实现细节，不改变产品方向：
 
-- 返回主页、重登和 View 重建时当前入口地址去重策略是否稳定；
-- 正式管理容器应使用独立 Screen/Sheet，还是独立 Canvas 子树；
-- 正式容器的关闭、返回、遮罩、输入阻断和排序层级；
+- 最新 Reload 入口缓存失效在返回主页、重登和 View 重建时是否稳定；
+- 当前 SettingWindow 容器在关闭、返回、遮罩、输入阻断和不同分辨率下是否完整；
 - 服装 Cell 的完整 Model/View/Presenter 签名；
 - 发型选择实际使用的 Cell 与数据模型；
-- CostumeHead 的 `hairAssetId` 与 source 的准确归一化规则；
+- CostumeHead 官方预览图在当前固定行中的最终加载与显示时序；
 - 游戏角色显示名的最佳读取路径；
 - 官方 Cell 是否能够在非原页面上下文独立加载图标；
 - 登录/登出时最可靠的缓存清理事件；
@@ -1002,16 +1066,15 @@ gakumas-in-game-mod-manager\
 
 从当前已验证状态继续：
 
-1. 补完返回主页、重登、重复打开和分辨率的 M1 生命周期测试；
-2. 选择正式管理容器，先实现纯文本列表的打开、关闭、返回和刷新；
-3. 拆分 Runtime 快照、Presentation Model 与 View 绑定；
-4. 实现服装/发型分栏和玩家文案，不显示技术字段；
-5. 验证 Costume Master、服装 Cell 和官方图标；
-6. 验证 CostumeHead、发型 Cell 和官方图标；
-7. 接入 `setModEnabled`、待重启状态和写入失败恢复；
-8. 将 Runtime/Manager API 头文件整理为单一共享 SDK；
-9. 接入 `appliedThisSession` 真实记录并补齐异常/兼容测试；
-10. 完成发布构建、安装和卸载验证。
+1. **已部署待复验：**执行 Mod → 设置 → 菜单，确认 Reload 后“Mod 管理”入口仍存在；再验证设置 → Mod 与 Mod → Mod；
+2. **已部署待复验：**对同一服装 Mod 执行 ON/OFF/ON 并直接返回主页，确认颜色不再需要切换游戏页面；
+3. 实机确认发型 `GetThumbAssetName()` + `ThumbnailViewBase.Set()` 的官方预览图最终可见；
+4. 实机触发启动时冲突组全关和运行中新 Mod 被拒绝的两种提示；
+5. 补完返回主页、重登、重复打开、分辨率和长期运行生命周期；
+6. 根据大列表实机结果决定是否把固定设置行升级为专用可复用 Cell；
+7. 将 Runtime/Manager API 头文件整理为单一共享 SDK；
+8. 接入 `appliedThisSession` 真实记录并补齐异常/兼容测试；
+9. 完成发布构建、安装和卸载验证。
 
-当前最优先的是正式容器和生命周期，不是继续美化验证面板，也不是开始任何借卡或网络
-API 功能。
+当前最优先的是最新入口缓存和即时颜色补丁的实机闭环，然后完成全屏设置模板生命周期与
+异常矩阵；不是继续维护旧文字探针，也不是开始借卡或网络 API 功能。

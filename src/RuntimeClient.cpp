@@ -6,7 +6,6 @@ namespace GakumasModManager {
     bool RuntimeClient::Connect() {
         constexpr const wchar_t* kRuntimeModules[] = {
             L"xinput1_3.dll",
-            L"xinput3.dll",
         };
 
         for (const auto moduleName : kRuntimeModules) {
@@ -60,6 +59,13 @@ namespace GakumasModManager {
         }
         if (buffer.data) api_.freeBuffer(buffer.data);
         return true;
+    }
+
+    GmrResult RuntimeClient::SetModEnabled(const std::string& modId, const bool enabled) const {
+        if (!connected_ || !api_.setModEnabled || modId.empty()) {
+            return GMR_E_INVALID_ARGUMENT;
+        }
+        return api_.setModEnabled(modId.c_str(), enabled ? 1 : 0);
     }
 
     const GmrRuntimeApiV1* RuntimeClient::Api() const {

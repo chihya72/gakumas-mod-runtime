@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <string>
 #include <thread>
 
 namespace {
@@ -27,13 +28,35 @@ namespace {
         return std::filesystem::path(L"gakumas-local") / L"mod-manager.log";
     }
 
+    std::string ProcessName() {
+        wchar_t modulePath[MAX_PATH]{};
+        const auto length = GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
+        if (length == 0 || length >= MAX_PATH) return "<unknown>";
+
+        const auto name = std::filesystem::path(modulePath, modulePath + length).filename().wstring();
+        const auto byteCount = WideCharToMultiByte(
+            CP_UTF8, WC_ERR_INVALID_CHARS, name.data(), static_cast<int>(name.size()),
+            nullptr, 0, nullptr, nullptr);
+        if (byteCount <= 0) return "<unknown>";
+
+        std::string result(static_cast<std::size_t>(byteCount), '\0');
+        if (WideCharToMultiByte(
+                CP_UTF8, WC_ERR_INVALID_CHARS, name.data(), static_cast<int>(name.size()),
+                result.data(), byteCount, nullptr, nullptr) != byteCount) {
+            return "<unknown>";
+        }
+        return result;
+    }
+
     void DebugLog(const char* message) {
         SYSTEMTIME now{};
         GetLocalTime(&now);
+        static const auto processName = ProcessName();
 
         char line[1024]{};
         std::snprintf(line, sizeof(line),
-            "[%04u-%02u-%02u %02u:%02u:%02u.%03u] [GakumasModManager] %s\n",
+            "[%04u-%02u-%02u %02u:%02u:%02u.%03u] [GakumasModManager] "
+            "[pid=%lu process=%s] %s\n",
             now.wYear,
             now.wMonth,
             now.wDay,
@@ -41,6 +64,8 @@ namespace {
             now.wMinute,
             now.wSecond,
             now.wMilliseconds,
+            static_cast<unsigned long>(GetCurrentProcessId()),
+            processName.c_str(),
             message);
 
         OutputDebugStringA(line);
@@ -61,21 +86,17 @@ namespace {
         DebugLog("xinput9_1_0.dll loaded; manager bootstrap thread started.");
         GakumasModManager::RuntimeClient runtime;
         for (int attempt = 0; attempt < 600 && !g_stop.load(); ++attempt) {
-            if (runtime.Connect() && runtime.IsReady()) {
-                DebugLog("M1 probe connected to Runtime API v1; UI hook is intentionally disabled.");
+            if (runtime.Connect()) {
                 std::string snapshot;
                 if (runtime.GetModsJson(snapshot)) {
                     char message[256]{};
                     std::snprintf(message, sizeof(message),
-                        "M2 Runtime snapshot acquired (%zu bytes); JSON parsing/UI binding is pending.",
+                        "Runtime API v1 ready (%zu-byte snapshot); starting the in-game UI probe.",
                         snapshot.size());
                     DebugLog(message);
+                    GakumasModManager::StartCampusUiProbe();
+                    return;
                 }
-                else {
-                    DebugLog("M2 Runtime snapshot request failed; UI entry remains disabled.");
-                }
-                GakumasModManager::StartCampusUiProbe();
-                return;
             }
             if (attempt == 0 || attempt % 100 == 0) {
                 DebugLog("Waiting for a ready Runtime API.");
