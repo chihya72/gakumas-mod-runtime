@@ -12,16 +12,50 @@
 - 支持 `body=Geo_Body`；
 - 支持 `hair=Geo_Hair` 或 `Geo_Hair+Geo_HairProp`；
 - 从本地 AssetBundle 懒加载替换资源；
+- 启动时注册全部有效替换候选，并通过 Runtime API 在当前会话热切换有效规则；
+- 标准 `SkinnedMeshRenderer` 替换保存原 Mesh、材质和骨骼绑定；OFF 恢复当前实例与缓存 Prefab，ON 对对应资源子树重新应用；
+- 整对象替换与附加式规则暂不承诺即时逆转，仍按后续资源加载状态处理；
+- 同一服装/发型目标只允许一个启用 Mod；运行中拒绝冲突开启，启动时若同组多项开启则自动持久化关闭整组；
 - 在原始 `SkinnedMeshRenderer` 上替换克隆后的 Mesh；
 - 按骨骼名重排 skinning 数据，失败时保留原始 Mesh；
 - 按 renderer、材质槽和 shader property 替换贴图；
-- 为贴图覆盖创建私有材质，并在游戏更新 `MaterialPropertyBlock` 或 `Material.SetTexture`
-  时按材质槽持续合并；
+- 为贴图覆盖创建私有材质；保留 `set_sharedMaterials` / `set_materials` 诊断与恢复路径，
+  同时保留当前 `MaterialPropertyBlock` 参数；
 - 写入 `gakumas-local/mod-plugin.log`；
 - 输出 source profile，并提供离线 Validator 与 Author Doctor。
 
 manifest 格式见 [docs/manifest-v2.md](docs/manifest-v2.md)，当前限制和后续任务见
 [docs/roadmap.md](docs/roadmap.md)。
+
+## 当前验证状态
+
+2026-08-01 实机已经确认：
+
+- 管理器通过 `GmrGetRuntimeApiV1` 读取快照和切换 Mod；
+- Manifest 写回和当前会话有效 replacement map 同步更新；
+- 标准服装替换可以热关闭、再热开启；
+- 热重应用日志记录目标、应用数和活动 Animation Rig 刷新。
+
+当前已恢复到 IDA MCP 调查前的已验证基线：标准服装 OFF/ON 热切换不崩溃，但热 ON 后
+直接返回主页仍可能颜色错误；切换一次游戏页面后恢复正常。
+
+> **已证伪：**「Renderer 已有的每材质 `MaterialPropertyBlock` 旧贴图覆盖克隆材质」这一
+> 结论是错的。实机探针确认游戏在这些场景**从不调用 `Renderer.SetPropertyBlock`**，
+> 基于该结论的几轮修复改的是一条从未执行的路径。
+
+2026-08-02 探针确认的真实写入者是：游戏在热重应用之后调用材质数组写回，换掉带 Mod
+贴图的私有材质。IDA 后加入的底层 `SetMaterialArray_Injected` 实验钩子及其后续受限扫描
+连续造成加载卡住或点击崩溃，现已从源码和部署版移除。完整的排除过程、证据和下一步见
+管理器仓库的
+`docs/OPEN_DEFECTS.md`。
+
+当前游戏目录部署版：
+
+```text
+D:\Games\gakumas\xinput1_3.dll
+大小：570880 字节
+SHA-256：F88C74F5FFB5114FE20B622AD82A1C877C6461725C95031419EF4E6A8065A969
+```
 
 ## 构建
 
@@ -67,5 +101,7 @@ python tools\gakumas_mod_doctor.py <mod-dir> --profile <source-profile.json>
 python -m unittest discover -s tests -v
 ```
 
-完整验收还应重新生成 Release DLL，并核对 `xinput1_3.def` 的 8 个导出。PropertyBlock
-持久覆盖目前有源码契约测试，但仍需要在目标游戏版本进行暗色/正常光照实机验证。
+当前 Release 构建已通过，Python `unittest discover` 的 4 项测试通过。完整验收还应核对
+`xinput1_3.def` 的 8 个导出，并在目标游戏复验热 ON/OFF/ON 后无需切换页面即可得到正确
+Mesh、材质、骨骼和颜色。旧的 3DMigoto 暗色调查与本次热开关 MPB 提交缺陷是两个独立问题，
+见 [AB_DARK_RENDERING_INVESTIGATION.md](AB_DARK_RENDERING_INVESTIGATION.md)。

@@ -579,3 +579,63 @@ mod 全身只有 0.13–0.17。
 4. **同一个平台上的旧结论要分清哪一半可转移。** 3DMigoto 时代的槽位重排结论对 AB
    路线不成立（Unity 按属性名绑定，品红探针已实测证明），但它底下那张
    「body 有约 28 个 PS 变体、按光照切换」的事实是这次定位的关键线索。
+
+## 18. 2026-08-01 热开关后的颜色刷新问题
+
+这是后续 Runtime 热开关改造暴露的**独立问题**，不能与第 14 节的 3DMigoto ShaderFixes
+残留混为一谈。
+
+### 18.1 现象与边界
+
+- Mod 在启动时已经开启，第一次进入主页显示正常；
+- 游戏内 OFF/ON 热切换本身生效，Mesh、材质和目标资源重新应用；
+- 热 ON 后直接返回主页时颜色错误；
+- 再切换一次游戏页面，画面恢复正常；
+- Runtime 日志记录热重应用 `targets=2, applied=2, refreshedRigs=1`。
+
+这些证据把问题限制在“已实例化 Renderer 的状态提交”，而不是 Bundle 未加载、replacement
+map 未更新或 Mesh 没有重新应用。页面切换能恢复也说明游戏自身的下一轮 Renderer 初始化会
+补上缺少的状态。
+
+### 18.2 已确认原因
+
+实机互补探针已经证伪“旧 `MaterialPropertyBlock` 覆盖克隆材质”：这些场景没有调用
+`Renderer.SetPropertyBlock`，`Material.SetTexture` 也没有向 Mod 材质写入。真实写入者是游戏
+在热重应用之后调用 `Renderer.set_sharedMaterials` / `set_materials`，把带 Mod 贴图的私有
+材质数组换回原始数组。页面切换之所以恢复，是因为下一轮页面初始化重新走了完整替换路径。
+
+旧修复只做了：
+
+- Bounds 重置；
+- Renderer enabled 状态刷新；
+- 活动 Rig 目标节点停用/启用；
+- 动态骨重新注册。
+
+这些操作足以刷新 Mesh 和骨骼，但无法阻止游戏随后写回原始材质数组。
+
+### 18.3 当前处置
+
+当前 `ModRuntime.cpp` 保留每个原 Renderer 完成热重应用后的持久贴图覆盖逻辑：
+
+```text
+ApplyPersistentTextureOverrides(pair.originalRenderer)
+```
+
+它先读取并保留游戏现有 Block 的肤色、遮罩、光照等字段，再只覆盖 Manifest 声明的 Texture
+property，并按材质槽提交回 Renderer。不能用 `SetPropertyBlock(null, slot)` 清空整个 Block，
+否则会破坏游戏自己的角色外观参数。
+
+IDA 后加入的底层材质数组钩子及后续受限 Renderer 扫描连续导致加载卡住或 ON/OFF 崩溃，
+现已撤回。当前部署精确恢复为 `20260802-041055` 保存的调查前 Runtime：`570880` 字节，
+SHA-256 `F88C74F5FFB5114FE20B622AD82A1C877C6461725C95031419EF4E6A8065A969`。
+预期基线是热切换不崩溃，但直接回主页的颜色仍可能需要切换页面刷新。
+
+### 18.4 与旧暗色问题的区分
+
+| 问题 | 根因 | 是否依赖热开关 | 页面切换是否恢复 | 当前处置 |
+|---|---|---:|---:|---|
+| 第 14 节场景暗色 | 3DMigoto `ShaderFixes` 中重编译的残留 Shader | 否 | 否 | 残留已移出 |
+| 本节热 ON 颜色错误 | 游戏材质数组写回换回原始材质 | 是 | 是 | 即时修复实验已撤回，保留切页刷新基线 |
+
+今后出现颜色异常时，先记录是否经过热开关、页面切换能否恢复、Renderer/MPB 日志，再决定
+进入哪条调查路线，不能因为两者都表现为“颜色不对”就复用同一结论。

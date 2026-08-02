@@ -26,6 +26,7 @@ enum {
     GMR_E_IO = 7,
     GMR_E_CONCURRENT_CHANGE = 8,
     GMR_E_INTERNAL = 9,
+    GMR_E_TARGET_CONFLICT = 10,
 };
 
 enum {

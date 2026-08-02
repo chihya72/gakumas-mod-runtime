@@ -1,5 +1,8 @@
 # Manifest v2
 
+> 最后更新：2026-08-01。`enabled` 现在同时控制当前 Runtime 会话和下次启动配置；标准
+> `SkinnedMeshRenderer` 替换支持热开关，不再默认要求重启游戏。
+
 runtime 扫描：
 
 ```text
@@ -51,8 +54,8 @@ gakumas-local/local-files/mods/<mod-id>/mod.json
 
 | 字段 | 说明 |
 |---|---|
-| `enabled` | 是否注册该 Mod |
-| `priority` | 冲突优先级；高值生效，同值时后扫描规则覆盖并记录日志 |
+| `enabled` | 是否在当前会话注册该 Mod，并持久化为下次启动状态 |
+| `priority` | 低层 replacement 兼容字段；管理器不会用它在同一服装/发型中自动挑选赢家 |
 | `source` | 游戏原始资源名；兼容旧别名 `from`、`target` |
 | `part` | `face`、`hair` 或 `body` |
 | `bundle` | 相对当前 Mod 目录的 AssetBundle 路径 |
@@ -76,3 +79,49 @@ runtime 可以重排已存在骨骼的 skinning 数据，但不会自动修权�
 > 管理器第一版的产品约束更窄：一个 Mod Manifest 只显示一个逻辑目标（一个 `body` 服装
 > 或一个 `hair` 发型）。Runtime 仍按兼容性保留 `replacements[]` 数组并逐项解析；如果
 > 管理器发现多条 replacement，必须将该 Mod 标记为配置异常，不在玩家界面展开成多件服装。
+
+## 逻辑目标与冲突
+
+Runtime 通过标准化后的 `part + source/masterKey` 建立玩家能理解的逻辑目标：
+
+- `body` → 一件服装；
+- `hair` → 一个发型；
+- 同一逻辑目标只允许一个 Mod 启用。
+
+冲突不再依赖 `priority` 静默选择：
+
+- 启动扫描发现同目标多个 Manifest 都为 `enabled=true`，整组全部自动写回 `false`，并在
+  Runtime 快照保存冲突对象和“已自动关闭”状态；
+- 当前会话已有同目标 Mod 启用时，另一个 Mod 的开启请求被拒绝，现有 Mod 保持 ON，
+  新 Mod 保持 OFF；
+- 玩家先关闭现有 Mod 后，才能开启同目标的另一个 Mod。
+
+## 当前会话热开关
+
+API 切换成功时先更新当前会话有效 replacement map，再原子写回 Manifest。标准原地
+`SkinnedMeshRenderer` 规则会：
+
+- 首次应用时保存原 Mesh、材质、骨骼、根骨和每材质 `MaterialPropertyBlock`；
+- OFF 时恢复当前场景实例与缓存 Prefab；
+- ON 时对目标资源子树重应用并刷新活动 Animation Rig；
+- 立即把 Mod 贴图合并到 Renderer 已有的 PropertyBlock，保留游戏自己的其他属性。
+- Runtime 保留 `Renderer.set_sharedMaterials` / `set_materials` 的诊断与恢复路径；游戏当前
+  实际使用的底层材质数组写回仍可能让主页颜色在热 ON 后暂时错误，切换页面会重新走完整
+  替换路径并恢复。IDA 后的底层 icall 实验钩子已因崩溃撤回。
+
+整对象替换和附加式规则暂不保证即时逆转；它们可能需要重新选择资源、重进场景或重启。
+热开关改变的是 Manifest 状态与 Runtime 会话，不会把 AssetBundle 改成启动时全部预加载；
+资源仍按请求懒加载。
+
+## 管理器兼容约束
+
+为获得完整游戏内 UI，一个 Manifest 应满足：
+
+- `id` 唯一且稳定；
+- 只有一条逻辑 replacement；
+- `part` 为 `body` 或 `hair`；
+- `source` 能归一化到 Costume 或 CostumeHead Master；
+- Bundle 文件存在且路径不逃逸 Mod 目录；
+- 玩家名称写在 `name`，不要把资源 ID 当作显示名称。
+
+不满足这些约束的 Manifest 仍可被目录扫描并报告错误，但管理器不会把它伪装成正常服装或发型。

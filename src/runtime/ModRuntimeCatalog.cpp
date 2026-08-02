@@ -1,6 +1,7 @@
 #include "ModRuntimeCatalog.hpp"
 
 #include "ModLog.hpp"
+#include "ModRuntime.hpp"
 
 #include <Windows.h>
 
@@ -43,6 +44,8 @@ namespace GakumasMod::Runtime::Catalog {
             bool registeredThisSession{false};
             bool appliedThisSession{false};
             bool restartRequired{false};
+            bool autoDisabledByConflict{false};
+            bool enableBlockedByConflict{false};
         };
 
         std::shared_mutex g_catalogMutex;
@@ -259,6 +262,61 @@ namespace GakumasMod::Runtime::Catalog {
             }
         }
 
+        bool UsesSameTarget(const ModRecord& left, const ModRecord& right) {
+            return left.manifestState == "valid"
+                && right.manifestState == "valid"
+                && left.targetKind == right.targetKind
+                && left.targetKey == right.targetKey;
+        }
+
+        void ClearConflictState(ModRecord& record) {
+            record.autoDisabledByConflict = false;
+            record.enableBlockedByConflict = false;
+            record.conflictWithId.clear();
+            record.conflictWithName.clear();
+        }
+
+        void SetStartupConflict(ModRecord& record, const ModRecord& other) {
+            record.autoDisabledByConflict = true;
+            record.enableBlockedByConflict = false;
+            record.conflictWithId = other.id;
+            record.conflictWithName = other.name;
+        }
+
+        void SetEnableBlockedConflict(ModRecord& record, const ModRecord& active) {
+            record.autoDisabledByConflict = false;
+            record.enableBlockedByConflict = true;
+            record.conflictWithId = active.id;
+            record.conflictWithName = active.name;
+        }
+
+        void RecomputeRuntimeStates(std::vector<ModRecord>& records) {
+            for (auto& record : records) {
+                record.restartRequired = false;
+                if (record.manifestState != "valid") {
+                    ClearConflictState(record);
+                    record.registeredThisSession = false;
+                    record.runtimeState = "invalid";
+                    continue;
+                }
+                if (record.autoDisabledByConflict) {
+                    record.registeredThisSession = false;
+                    record.runtimeState = "conflict_auto_disabled";
+                    continue;
+                }
+                if (record.enableBlockedByConflict) {
+                    record.registeredThisSession = false;
+                    record.runtimeState = "conflict_enable_blocked";
+                    continue;
+                }
+                record.conflictWithId.clear();
+                record.conflictWithName.clear();
+                record.registeredThisSession = record.configuredEnabled;
+                record.runtimeState = record.configuredEnabled ? "active" : "disabled";
+            }
+            ApplyConflicts(records);
+        }
+
         json ToJson(const ModRecord& record) {
             json output{
                 {"id", record.id},
@@ -327,16 +385,92 @@ namespace GakumasMod::Runtime::Catalog {
 
             record.manifestStamp = GetManifestStamp(record.manifestPath);
             record.configuredEnabled = enabled;
-            record.restartRequired = record.configuredEnabled != record.registeredThisSession;
-            if (record.manifestState == "valid") {
-                if (record.restartRequired) {
-                    record.runtimeState = enabled ? "pending_enable" : "pending_disable";
+            record.restartRequired = false;
+            return GMR_OK;
+        }
+
+        void AutoDisableStartupConflicts(std::vector<ModRecord>& records) {
+            std::unordered_map<std::string, std::vector<size_t>> groups;
+            for (size_t index = 0; index < records.size(); ++index) {
+                const auto& record = records[index];
+                if (record.manifestState != "valid" || !record.configuredEnabled) continue;
+                groups[record.targetKind + "|" + record.targetKey].push_back(index);
+            }
+
+            for (auto& [groupKey, indexes] : groups) {
+                (void)groupKey;
+                if (indexes.size() < 2) continue;
+
+                std::vector<ModRecord*> sessionDisabled;
+                sessionDisabled.reserve(indexes.size());
+                for (const auto index : indexes) {
+                    auto& record = records[index];
+                    const auto sessionResult = GakumasMod::Runtime::SetSessionModEnabled(
+                        record.id.c_str(), 0);
+                    if (sessionResult != GMR_OK) {
+                        Log::ErrorFmt(
+                            "[RuntimeApi] Failed to disable startup conflict group in session: mod=%s result=%u",
+                            record.id.c_str(), sessionResult);
+                        for (auto disabled = sessionDisabled.rbegin();
+                             disabled != sessionDisabled.rend();
+                             ++disabled) {
+                            GakumasMod::Runtime::SetSessionModEnabled(
+                                (*disabled)->id.c_str(), 1);
+                        }
+                        sessionDisabled.clear();
+                        break;
+                    }
+                    sessionDisabled.push_back(&record);
                 }
-                else {
-                    record.runtimeState = enabled ? "active" : "disabled";
+                if (sessionDisabled.size() != indexes.size()) continue;
+
+                std::vector<ModRecord*> persisted;
+                persisted.reserve(indexes.size());
+                bool persistenceFailed = false;
+                for (const auto index : indexes) {
+                    auto& record = records[index];
+                    const auto persistResult = PersistEnabled(record, false);
+                    if (persistResult != GMR_OK) {
+                        persistenceFailed = true;
+                        Log::ErrorFmt(
+                            "[RuntimeApi] Failed to persist startup conflict group disable: mod=%s result=%u",
+                            record.id.c_str(), persistResult);
+                        for (auto changed = persisted.rbegin(); changed != persisted.rend(); ++changed) {
+                            const auto rollback = PersistEnabled(**changed, true);
+                            if (rollback != GMR_OK) {
+                                Log::ErrorFmt(
+                                    "[RuntimeApi] Failed to roll back startup conflict manifest: mod=%s result=%u",
+                                    (*changed)->id.c_str(), rollback);
+                            }
+                        }
+                        for (auto disabled = sessionDisabled.rbegin();
+                             disabled != sessionDisabled.rend();
+                             ++disabled) {
+                            const auto rollback = GakumasMod::Runtime::SetSessionModEnabled(
+                                (*disabled)->id.c_str(), 1);
+                            if (rollback != GMR_OK) {
+                                Log::ErrorFmt(
+                                    "[RuntimeApi] Failed to roll back startup conflict session: mod=%s result=%u",
+                                    (*disabled)->id.c_str(), rollback);
+                            }
+                        }
+                        break;
+                    }
+                    persisted.push_back(&record);
+                }
+                if (persistenceFailed) continue;
+
+                for (size_t position = 0; position < indexes.size(); ++position) {
+                    auto& record = records[indexes[position]];
+                    const auto otherIndex = indexes[(position + 1) % indexes.size()];
+                    SetStartupConflict(record, records[otherIndex]);
+                    Log::InfoFmt(
+                        "[RuntimeApi] Auto-disabled startup conflict: mod=%s other=%s target=%s",
+                        record.id.c_str(),
+                        records[otherIndex].id.c_str(),
+                        record.targetKey.c_str());
                 }
             }
-            return GMR_OK;
         }
     }
 
@@ -361,7 +495,8 @@ namespace GakumasMod::Runtime::Catalog {
         for (const auto& manifest : manifests) {
             records.push_back(ParseManifest(manifest));
         }
-        ApplyConflicts(records);
+        AutoDisableStartupConflicts(records);
+        RecomputeRuntimeStates(records);
 
         std::unique_lock lock(g_catalogMutex);
         g_records = std::move(records);
@@ -420,8 +555,46 @@ namespace GakumasMod::Runtime::Catalog {
             match = &record;
         }
         if (!match) return GMR_E_MOD_NOT_FOUND;
-        if (match->configuredEnabled == (enabled != 0)) return GMR_OK;
-        return PersistEnabled(*match, enabled != 0);
+        if (match->manifestState != "valid") return GMR_E_MANIFEST_INVALID;
+        const auto desired = enabled != 0;
+        if (desired) {
+            for (auto& record : g_records) {
+                if (&record == match || !record.configuredEnabled) continue;
+                if (!UsesSameTarget(record, *match)) continue;
+                SetEnableBlockedConflict(*match, record);
+                RecomputeRuntimeStates(g_records);
+                Log::WarnFmt(
+                    "[RuntimeApi] Rejected conflicting enable: mod=%s active=%s target=%s",
+                    match->id.c_str(), record.id.c_str(), match->targetKey.c_str());
+                return GMR_E_TARGET_CONFLICT;
+            }
+        }
+
+        if (match->configuredEnabled == desired) return GMR_OK;
+
+        const auto previous = match->configuredEnabled;
+        const auto sessionResult = GakumasMod::Runtime::SetSessionModEnabled(
+            match->id.c_str(), desired ? 1 : 0);
+        if (sessionResult != GMR_OK) return sessionResult;
+
+        const auto persistResult = PersistEnabled(*match, desired);
+        if (persistResult != GMR_OK) {
+            const auto rollback = GakumasMod::Runtime::SetSessionModEnabled(
+                match->id.c_str(), previous ? 1 : 0);
+            if (rollback != GMR_OK) {
+                Log::ErrorFmt(
+                    "[RuntimeApi] Failed to roll back session toggle after persistence error: mod=%s result=%u",
+                    match->id.c_str(), rollback);
+            }
+            return persistResult;
+        }
+
+        for (auto& record : g_records) {
+            if (UsesSameTarget(record, *match)) ClearConflictState(record);
+        }
+
+        RecomputeRuntimeStates(g_records);
+        return GMR_OK;
     }
 
     void WriteLog(const uint32_t level, const char* component, const char* messageUtf8) {

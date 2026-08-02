@@ -12,13 +12,16 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -80,6 +83,7 @@ namespace GakumasMod::Runtime {
         };
 
         struct LocalModAssetReplacement {
+            std::string modId;
             std::string modName;
             std::string manifestPath;
             std::string sourceName;
@@ -92,6 +96,7 @@ namespace GakumasMod::Runtime {
             bool attachToOriginal{};
             std::string rendererName;
             int priority{};
+            bool sessionEnabled{true};
             bool replaceMaterials{};
             Il2CppGCHandle bundleHandle{};
             std::vector<LocalModRendererRule> rendererRules{};
@@ -108,6 +113,47 @@ namespace GakumasMod::Runtime {
             void* modRenderer{};
             size_t originalIndex{};
             size_t modIndex{};
+        };
+
+        struct PersistentMaterialTextureOverride {
+            int propertyId{};
+            std::string propertyName;
+            void* texture{};
+        };
+
+        struct RendererSlotTextureOverrides {
+            int materialIndex{};
+            std::vector<PersistentMaterialTextureOverride> textures{};
+        };
+
+        struct ReversibleRendererPatch {
+            std::string modId;
+            std::string sourceName;
+            void* patchedRenderer{};
+            void* patchedMesh{};
+            void* originalMesh{};
+            int sourceRootDepth{};
+            // Keep the complete Mod material array.  patchedMaterialKeys is
+            // useful for identity checks, but cannot reconstruct slot order
+            // when only some slots differ from the original.
+            std::vector<void*> patchedMaterials{};
+            std::vector<void*> patchedMaterialKeys{};
+            std::vector<void*> originalMaterials{};
+            std::vector<std::string> originalBoneNames{};
+            std::string originalRootBoneName;
+        };
+
+        struct ActiveAnimationRigContext {
+            void* rig{};
+            void* initializeData{};
+            void* rootTransform{};
+            void* rootGameObject{};
+        };
+
+        struct RendererPropertyBlockSnapshot {
+            void* block{};
+            Il2CppGCHandle handle{};
+            bool empty{};
         };
 
         struct LocalModBoneWeight {
@@ -182,21 +228,39 @@ namespace GakumasMod::Runtime {
         using AssetBundleRequestGetResultFn = void* (*)(void*);
         using AssetBundleRequestGetAssetFn = void* (*)(void*);
         using CampusActorAnimationRigRegisterBonesFn = void (*)(void*, void*);
+        // These are managed IL2CPP methods, not native icalls. Unity 6 method
+        // pointers include the trailing MethodInfo* argument.
+        using RendererSetPropertyBlockFn = void (*)(void*, void*, void*);
+        using RendererSetPropertyBlockMaterialIndexFn = void (*)(void*, void*, int, void*);
+        using MaterialSetTextureFn = void (*)(void*, int, void*, void*);
+        using MaterialSetTextureStringFn = void (*)(void*, Il2cppString*, void*, void*);
 
         AssetBundleLoadAssetFn AssetBundle_LoadAsset_Orig{};
         AssetBundleLoadAssetAsyncFn AssetBundle_LoadAssetAsync_Orig{};
         AssetBundleRequestGetResultFn AssetBundleRequest_GetResult_Orig{};
         AssetBundleRequestGetAssetFn AssetBundleRequest_get_asset_Orig{};
         CampusActorAnimationRigRegisterBonesFn CampusActorAnimationRig_RegisterBones_Orig{};
+        RendererSetPropertyBlockFn Renderer_SetPropertyBlock_Orig{};
+        RendererSetPropertyBlockMaterialIndexFn Renderer_SetPropertyBlockMaterialIndex_Orig{};
+        MaterialSetTextureFn Material_SetTexture_Orig{};
+        MaterialSetTextureStringFn Material_SetTextureString_Orig{};
 
         std::atomic_bool g_initialized{};
         std::vector<void*> g_hookTargets{};
         std::mutex g_historyMutex;
         std::mutex g_bundleMutex;
+        std::mutex g_materialOverrideMutex;
+        std::mutex g_propertyBlockScratchMutex;
+        std::mutex g_propertyBlockSnapshotMutex;
+        std::mutex g_reversiblePatchMutex;
+        std::mutex g_animationRigMutex;
         std::unordered_map<void*, std::string> g_loadHistory{};
 
         std::unordered_map<std::string, Il2CppGCHandle> g_bundleHandleMap{};
-        std::unordered_map<std::string, LocalModAssetReplacement> g_replacementMap{};
+        using LocalModAssetReplacementPtr = std::shared_ptr<LocalModAssetReplacement>;
+        std::shared_mutex g_replacementMutex;
+        std::vector<LocalModAssetReplacementPtr> g_registeredReplacements{};
+        std::unordered_map<std::string, LocalModAssetReplacementPtr> g_replacementMap{};
         std::unordered_map<std::string, Il2CppGCHandle> g_loadedAssetHandleMap{};
         std::unordered_set<void*> g_transformedMeshSet{};
         // Names (GameObject names) of mod-created ActorSwingDynamicBone. Matched by name
@@ -218,13 +282,45 @@ namespace GakumasMod::Runtime {
         std::unordered_set<void*> g_createdHostChains{};
         std::vector<Il2CppGCHandle> g_runtimeMeshHandles{};
         std::vector<Il2CppGCHandle> g_runtimeBoneHandles{};
+        std::vector<Il2CppGCHandle> g_runtimeMaterialHandles{};
         std::unordered_map<void*, std::vector<void*>> g_hybridBonesByRenderer{};
+        std::unordered_map<void*, std::vector<PersistentMaterialTextureOverride>> g_materialTextureOverrides{};
+        std::unordered_map<void*, std::vector<RendererSlotTextureOverrides>> g_rendererTextureOverrideCache{};
+        // Internal Runtime material assignments (initial apply and OFF restore)
+        // must not be mistaken for the game's post-toggle write that the hook
+        // is meant to repair.
+        thread_local bool t_internalMaterialAssignment = false;
+        std::unordered_set<void*> g_privateMaterials{};
+        std::unordered_set<void*> g_loggedPersistentRenderers{};
+        // Renderers the game submits property blocks for that carry no mod
+        // overrides -- diagnostic only, see ApplyPersistentTextureOverrides.
+        std::unordered_set<void*> g_loggedUnmanagedRenderers{};
+        std::unordered_set<void*> g_loggedGameTextureWrites{};
+        std::unordered_map<void*, std::unordered_set<int>> g_runtimeOwnedPropertyBlockSlots{};
+        std::unordered_map<void*, std::unordered_map<int, RendererPropertyBlockSnapshot>>
+            g_rendererPropertyBlockSnapshots{};
+        std::vector<ReversibleRendererPatch> g_reversibleRendererPatches{};
+        std::unordered_map<std::string, std::vector<void*>> g_reapplyRootsByMod{};
+        std::unordered_map<std::string, std::vector<void*>> g_loadedSourceGameObjects{};
+        std::vector<ActiveAnimationRigContext> g_activeAnimationRigs{};
+        Il2CppGCHandle g_propertyBlockScratchHandle{};
+        UnityResolve::Method* g_rendererSetPropertyBlockMethod{};
+        UnityResolve::Method* g_rendererSetPropertyBlockMaterialIndexMethod{};
+        UnityResolve::Method* g_rendererGetPropertyBlockMethod{};
+        UnityResolve::Method* g_rendererGetPropertyBlockMaterialIndexMethod{};
+        UnityResolve::Method* g_materialPropertyBlockSetTextureMethod{};
+        UnityResolve::Method* g_materialPropertyBlockIsEmptyMethod{};
+        UnityResolve::Method* g_shaderPropertyToIdMethod{};
+        UnityResolve::Method* g_materialSetTextureMethod{};
+        UnityResolve::Method* g_materialSetTextureStringMethod{};
         std::unordered_set<std::string> g_dumpedProfiles{};
         std::atomic_bool g_rigRegisterObserved{};
         std::atomic_bool g_nativeChainValidation{};
         std::unordered_set<void*> g_nativeChainAttachedRoots{};
 
         bool AttachNativeChainToLiveRoot(UnityResolve::UnityType::Transform* rootTransform);
+        void RestoreRendererPropertyBlockSnapshots(void* renderer, size_t materialCount);
+        void ApplyPersistentTextureOverrides(void* renderer);
 
         std::string ToLowerAscii(std::string value) {
             std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char c) {
@@ -841,6 +937,35 @@ namespace GakumasMod::Runtime {
             return added;
         }
 
+        void RememberActiveAnimationRig(
+            void* rig,
+            void* rootTransform,
+            void* initializeData) {
+            const auto rootGameObject = rootTransform
+                ? reinterpret_cast<UnityResolve::UnityType::Component*>(rootTransform)->GetGameObject()
+                : nullptr;
+            if (!rig || !rootTransform || !rootGameObject || !initializeData) return;
+
+            std::lock_guard lock(g_animationRigMutex);
+            const auto existing = std::find_if(
+                g_activeAnimationRigs.begin(), g_activeAnimationRigs.end(),
+                [rig, rootGameObject](const auto& context) {
+                    return context.rig == rig || context.rootGameObject == rootGameObject;
+                });
+            const ActiveAnimationRigContext context{
+                rig,
+                initializeData,
+                rootTransform,
+                rootGameObject,
+            };
+            if (existing == g_activeAnimationRigs.end()) {
+                g_activeAnimationRigs.push_back(context);
+            }
+            else {
+                *existing = context;
+            }
+        }
+
         void CampusActorAnimationRig_RegisterBones_Hook(void* self, void* initializeData) {
             const auto initializeDataClass = FindClassByName("CampusActorAnimationInitializeData");
             auto rootTransform = initializeDataClass
@@ -853,6 +978,7 @@ namespace GakumasMod::Runtime {
                 Log::InfoFmt("[ModAsset] CampusActorAnimationRig.RegisterBones observed: self=%p root=%p data=%p",
                     self, rootTransform, initializeData);
             }
+            RememberActiveAnimationRig(self, rootTransform, initializeData);
             const auto nativeChainAttached = AttachNativeChainToLiveRoot(rootTransform);
             const auto added = AddActorSwingBonesToAnimationData(rootTransform, initializeData);
             if (added) {
@@ -1078,21 +1204,21 @@ namespace GakumasMod::Runtime {
                 return;
             }
 
-            if (manifest.contains("enabled") && manifest["enabled"].is_boolean() && !manifest["enabled"].get<bool>()) {
-                Log::InfoFmt("[ModAsset] Skipped disabled mod manifest: %s", manifestPath.string().c_str());
-                return;
-            }
-
             if (!manifest.contains("replacements") || !manifest["replacements"].is_array()) {
                 Log::ErrorFmt("[ModAsset] Manifest has no replacements array: %s", manifestPath.string().c_str());
                 return;
             }
 
             const auto manifestDir = manifestPath.parent_path();
+            const auto modId = GetJsonString(manifest, "id")
+                .value_or(manifestPath.parent_path().filename().string());
             const auto modName = GetJsonString(manifest, "name")
                 .or_else([&] { return GetJsonString(manifest, "id"); })
                 .value_or(manifestPath.stem().string());
             const auto manifestPriority = GetJsonInt(manifest, "priority", 0);
+            const auto sessionEnabled = !manifest.contains("enabled")
+                || !manifest["enabled"].is_boolean()
+                || manifest["enabled"].get<bool>();
             int loadedCount = 0;
 
             for (const auto& item : manifest["replacements"]) {
@@ -1246,27 +1372,9 @@ namespace GakumasMod::Runtime {
                     continue;
                 }
 
-                const auto replacementKey = NormalizeAssetName(*sourceName);
-                if (const auto existing = g_replacementMap.find(replacementKey); existing != g_replacementMap.end()) {
-                    if (priority < existing->second.priority) {
-                        Log::WarnFmt("[ModAsset] Replacement conflict skipped by priority: source=%s newMod=%s newPriority=%d existingMod=%s existingPriority=%d",
-                            sourceName->c_str(),
-                            modName.c_str(),
-                            priority,
-                            existing->second.modName.c_str(),
-                            existing->second.priority);
-                        continue;
-                    }
-
-                    Log::WarnFmt("[ModAsset] Replacement conflict overridden: source=%s newMod=%s newPriority=%d existingMod=%s existingPriority=%d",
-                        sourceName->c_str(),
-                        modName.c_str(),
-                        priority,
-                        existing->second.modName.c_str(),
-                        existing->second.priority);
-                }
-
-                g_replacementMap[replacementKey] = LocalModAssetReplacement{
+                auto replacement = std::make_shared<LocalModAssetReplacement>(
+                    LocalModAssetReplacement{
+                    modId,
                     modName,
                     manifestPath.string(),
                     *sourceName,
@@ -1279,6 +1387,7 @@ namespace GakumasMod::Runtime {
                     attachToOriginal,
                     rendererName,
                     priority,
+                    sessionEnabled,
                     replaceMaterials,
                     0,
                     std::move(rendererRules),
@@ -1286,31 +1395,66 @@ namespace GakumasMod::Runtime {
                     std::move(materialTextures),
                     std::move(materialColors),
                     std::move(materialFloats),
-                };
+                });
+                g_registeredReplacements.emplace_back(replacement);
                 ++loadedCount;
-                const auto& registeredReplacement = g_replacementMap[replacementKey];
-                Log::InfoFmt("[ModAsset] Registered replacement: %s -> %s (%s) mod=%s part=%s priority=%d wholeObject=%d skeleton=%s rendererRules=%zu materialCopies=%zu textures=%zu colors=%zu floats=%zu",
+                Log::InfoFmt("[ModAsset] Registered replacement candidate: %s -> %s (%s) modId=%s mod=%s enabled=%d part=%s priority=%d wholeObject=%d skeleton=%s rendererRules=%zu materialCopies=%zu textures=%zu colors=%zu floats=%zu",
                     sourceName->c_str(),
                     assetName.c_str(),
                     bundlePath.string().c_str(),
+                    modId.c_str(),
                     modName.c_str(),
-                    registeredReplacement.part.c_str(),
-                    registeredReplacement.priority,
-                    registeredReplacement.replaceWholeObject ? 1 : 0,
-                    registeredReplacement.skeletonAssetName.c_str(),
-                    registeredReplacement.rendererRules.size(),
-                    registeredReplacement.materialCopies.size(),
-                    registeredReplacement.materialTextures.size(),
-                    registeredReplacement.materialColors.size(),
-                    registeredReplacement.materialFloats.size());
+                    replacement->sessionEnabled ? 1 : 0,
+                    replacement->part.c_str(),
+                    replacement->priority,
+                    replacement->replaceWholeObject ? 1 : 0,
+                    replacement->skeletonAssetName.c_str(),
+                    replacement->rendererRules.size(),
+                    replacement->materialCopies.size(),
+                    replacement->materialTextures.size(),
+                    replacement->materialColors.size(),
+                    replacement->materialFloats.size());
             }
 
             Log::InfoFmt("[ModAsset] Manifest loaded: %s, replacements=%d", modName.c_str(), loadedCount);
         }
 
+        void RebuildActiveReplacementMapLocked(const bool logConflicts) {
+            g_replacementMap.clear();
+            for (const auto& replacement : g_registeredReplacements) {
+                if (!replacement || !replacement->sessionEnabled) continue;
+                const auto replacementKey = NormalizeAssetName(replacement->sourceName);
+                const auto existing = g_replacementMap.find(replacementKey);
+                if (existing != g_replacementMap.end()) {
+                    if (replacement->priority < existing->second->priority) {
+                        if (logConflicts) {
+                            Log::WarnFmt("[ModAsset] Active replacement conflict skipped by priority: source=%s newMod=%s newPriority=%d existingMod=%s existingPriority=%d",
+                                replacement->sourceName.c_str(),
+                                replacement->modName.c_str(),
+                                replacement->priority,
+                                existing->second->modName.c_str(),
+                                existing->second->priority);
+                        }
+                        continue;
+                    }
+                    if (logConflicts) {
+                        Log::WarnFmt("[ModAsset] Active replacement conflict overridden: source=%s newMod=%s newPriority=%d existingMod=%s existingPriority=%d",
+                            replacement->sourceName.c_str(),
+                            replacement->modName.c_str(),
+                            replacement->priority,
+                            existing->second->modName.c_str(),
+                            existing->second->priority);
+                    }
+                }
+                g_replacementMap[replacementKey] = replacement;
+            }
+        }
+
         void LoadLocalModManifests() {
             const auto modRoot = std::filesystem::path("./gakumas-local/local-files/mods");
+            std::unique_lock replacementLock(g_replacementMutex);
             g_replacementMap.clear();
+            g_registeredReplacements.clear();
 
             if (!std::filesystem::exists(modRoot)) {
                 Log::InfoFmt("[ModAsset] Mod directory not found, skipped: %s", modRoot.string().c_str());
@@ -1336,12 +1480,15 @@ namespace GakumasMod::Runtime {
                 LoadLocalModManifest(manifestPath);
             }
 
-            Log::InfoFmt("[ModAsset] Registered mod asset replacements: %zu", g_replacementMap.size());
+            RebuildActiveReplacementMapLocked(true);
+            Log::InfoFmt("[ModAsset] Registered mod asset replacement candidates: %zu active=%zu",
+                g_registeredReplacements.size(), g_replacementMap.size());
         }
 
-        LocalModAssetReplacement* FindLocalModAssetReplacement(const std::string& sourceName) {
+        LocalModAssetReplacementPtr FindLocalModAssetReplacement(const std::string& sourceName) {
+            std::shared_lock replacementLock(g_replacementMutex);
             const auto iter = g_replacementMap.find(NormalizeAssetName(sourceName));
-            return iter == g_replacementMap.end() ? nullptr : &iter->second;
+            return iter == g_replacementMap.end() ? nullptr : iter->second;
         }
 
         UnityResolve::Class* GetLocalModUnityClass(const std::string& typeName) {
@@ -1505,6 +1652,14 @@ namespace GakumasMod::Runtime {
             return renderer && SkinnedMeshRenderer_get_sharedMesh ? SkinnedMeshRenderer_get_sharedMesh(renderer) : nullptr;
         }
 
+        bool SetSkinnedMeshRendererSharedMesh(void* renderer, void* mesh) {
+            static auto SkinnedMeshRenderer_set_sharedMesh = reinterpret_cast<void (*)(void*, void*)>(
+                Il2cppUtils::GetMethodPointer("UnityEngine.CoreModule.dll", "UnityEngine", "SkinnedMeshRenderer", "set_sharedMesh"));
+            if (!renderer || !SkinnedMeshRenderer_set_sharedMesh) return false;
+            SkinnedMeshRenderer_set_sharedMesh(renderer, mesh);
+            return true;
+        }
+
         void SetSkinnedMeshRendererBones(void* renderer, UnityArray<void*>* bones) {
             static auto SkinnedMeshRenderer_set_bones = reinterpret_cast<void (*)(void*, UnityArray<void*>*)>(
                 Il2cppUtils::GetMethodPointer("UnityEngine.CoreModule.dll", "UnityEngine", "SkinnedMeshRenderer", "set_bones"));
@@ -1515,6 +1670,61 @@ namespace GakumasMod::Runtime {
             static auto SkinnedMeshRenderer_get_rootBone = reinterpret_cast<void* (*)(void*)>(
                 Il2cppUtils::GetMethodPointer("UnityEngine.CoreModule.dll", "UnityEngine", "SkinnedMeshRenderer", "get_rootBone"));
             return renderer && SkinnedMeshRenderer_get_rootBone ? SkinnedMeshRenderer_get_rootBone(renderer) : nullptr;
+        }
+
+        bool SetSkinnedMeshRendererRootBone(void* renderer, void* rootBone) {
+            static auto SkinnedMeshRenderer_set_rootBone = reinterpret_cast<void (*)(void*, void*)>(
+                Il2cppUtils::GetMethodPointer("UnityEngine.CoreModule.dll", "UnityEngine", "SkinnedMeshRenderer", "set_rootBone"));
+            if (!renderer || !SkinnedMeshRenderer_set_rootBone) return false;
+            SkinnedMeshRenderer_set_rootBone(renderer, rootBone);
+            return true;
+        }
+
+        void RefreshSkinnedMeshRendererState(void* renderer) {
+            if (!renderer || !IsNativeObjectAlive(renderer)) return;
+
+            static auto getEnabled = Il2cppUtils::GetMethod(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "Renderer", "get_enabled");
+            static auto setEnabled = Il2cppUtils::GetMethod(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "Renderer", "set_enabled",
+                { "System.Boolean" });
+            static auto resetBounds = Il2cppUtils::GetMethod(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "SkinnedMeshRenderer", "ResetBounds");
+            static auto resetLocalBounds = Il2cppUtils::GetMethod(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "SkinnedMeshRenderer", "ResetLocalBounds");
+
+            bool wasEnabled = true;
+            if (getEnabled && getEnabled->function) {
+                using GetEnabledFn = bool (*)(void*, void*);
+                wasEnabled = reinterpret_cast<GetEnabledFn>(getEnabled->function)(
+                    renderer, getEnabled->address);
+            }
+            if (wasEnabled && setEnabled && setEnabled->function) {
+                using SetEnabledFn = void (*)(void*, bool, void*);
+                reinterpret_cast<SetEnabledFn>(setEnabled->function)(
+                    renderer, false, setEnabled->address);
+            }
+            if (resetBounds && resetBounds->function) {
+                using ResetFn = void (*)(void*, void*);
+                reinterpret_cast<ResetFn>(resetBounds->function)(
+                    renderer, resetBounds->address);
+            }
+            if (resetLocalBounds && resetLocalBounds->function) {
+                using ResetFn = void (*)(void*, void*);
+                reinterpret_cast<ResetFn>(resetLocalBounds->function)(
+                    renderer, resetLocalBounds->address);
+            }
+            if (wasEnabled && setEnabled && setEnabled->function) {
+                using SetEnabledFn = void (*)(void*, bool, void*);
+                reinterpret_cast<SetEnabledFn>(setEnabled->function)(
+                    renderer, true, setEnabled->address);
+            }
+            Log::InfoFmt(
+                "[ModAsset] Refreshed active SkinnedMeshRenderer state: renderer=%s wasEnabled=%d resetBounds=%d resetLocalBounds=%d",
+                GetUnityObjectNameString(renderer).c_str(),
+                wasEnabled ? 1 : 0,
+                resetBounds && resetBounds->function ? 1 : 0,
+                resetLocalBounds && resetLocalBounds->function ? 1 : 0);
         }
 
         int GetMeshVertexCount(void* mesh) {
@@ -1556,6 +1766,47 @@ namespace GakumasMod::Runtime {
             static auto Component_get_transform = reinterpret_cast<UnityResolve::UnityType::Transform * (*)(void*)>(
                 Il2cppUtils::GetMethodPointer("UnityEngine.CoreModule.dll", "UnityEngine", "Component", "get_transform"));
             return component && Component_get_transform ? Component_get_transform(component) : nullptr;
+        }
+
+        UnityResolve::UnityType::Transform* GetHierarchyRoot(void* component) {
+            auto current = GetComponentTransform(component);
+            if (!current) return nullptr;
+            while (const auto parent = current->GetParent()) {
+                if (!IsNativeObjectAlive(parent)) break;
+                current = parent;
+            }
+            return current;
+        }
+
+        void* GetHierarchyRootGameObject(void* component) {
+            const auto root = GetHierarchyRoot(component);
+            return root ? root->GetGameObject() : nullptr;
+        }
+
+        int GetComponentDepthFromRoot(void* component, void* rootGameObject) {
+            if (!component || !rootGameObject) return 0;
+            auto current = GetComponentTransform(component);
+            const auto root = reinterpret_cast<UnityResolve::UnityType::GameObject*>(
+                rootGameObject)->GetTransform();
+            if (!current || !root) return 0;
+
+            int depth = 0;
+            while (current && current != root) {
+                current = current->GetParent();
+                ++depth;
+            }
+            return current == root ? depth : 0;
+        }
+
+        void* GetSourceRootGameObject(void* component, const int sourceRootDepth) {
+            auto current = GetComponentTransform(component);
+            if (!current) return nullptr;
+            for (int index = 0; index < sourceRootDepth; ++index) {
+                const auto parent = current->GetParent();
+                if (!parent || !IsNativeObjectAlive(parent)) return nullptr;
+                current = parent;
+            }
+            return current->GetGameObject();
         }
 
         UnityResolve::UnityType::Vector3 InverseTransformPoint(void* transform, const UnityResolve::UnityType::Vector3& position) {
@@ -1783,7 +2034,18 @@ namespace GakumasMod::Runtime {
             if (!rendererClass) return false;
             const auto renderers = rootGameObject->GetComponentsInChildren<void*>(rendererClass, true);
 
-            for (auto& [key, replacement] : g_replacementMap) {
+            std::vector<LocalModAssetReplacementPtr> activeReplacements;
+            {
+                std::shared_lock replacementLock(g_replacementMutex);
+                activeReplacements.reserve(g_replacementMap.size());
+                for (const auto& [key, replacement] : g_replacementMap) {
+                    (void)key;
+                    activeReplacements.emplace_back(replacement);
+                }
+            }
+            for (const auto& replacementPtr : activeReplacements) {
+                if (!replacementPtr) continue;
+                auto& replacement = *replacementPtr;
                 if (!replacement.attachToOriginal || !replacement.attachAsset) continue;
                 bool matched = false;
                 void* matchedMesh = nullptr;
@@ -1848,6 +2110,18 @@ namespace GakumasMod::Runtime {
             if (!transformClass || !gameObjectClass) return nullptr;
 
             const auto originalBoneIndexMap = BuildBoneNameIndexMap(originalBones);
+            std::unordered_map<std::string, UnityResolve::UnityType::Transform*> existingCreatedBones;
+            if (const auto hierarchyRoot = GetHierarchyRootGameObject(originalRenderer)) {
+                const auto hierarchyTransforms = reinterpret_cast<UnityResolve::UnityType::GameObject*>(
+                    hierarchyRoot)->GetComponentsInChildren<void*>(transformClass, true);
+                for (const auto item : hierarchyTransforms) {
+                    const auto name = GetUnityObjectNameString(item);
+                    if (!g_createdActorSwingBoneNames.contains(name)) continue;
+                    existingCreatedBones.emplace(
+                        name,
+                        reinterpret_cast<UnityResolve::UnityType::Transform*>(item));
+                }
+            }
             const auto hips = originalBoneIndexMap.find("Hips");
             size_t fallbackParentIndex = 0;
             if (hips != originalBoneIndexMap.end()) {
@@ -1907,6 +2181,11 @@ namespace GakumasMod::Runtime {
                     hybridBones[index] = originalBones->At(static_cast<unsigned int>(original->second));
                     ++matchedBones;
                 }
+                else if (const auto existing = existingCreatedBones.find(sidecarBone.name);
+                    existing != existingCreatedBones.end()) {
+                    hybridBones[index] = existing->second;
+                    ++createdBones;
+                }
                 else {
                     auto parent = reinterpret_cast<UnityResolve::UnityType::Transform*>(
                         originalBones->At(static_cast<unsigned int>(fallbackParentIndex)));
@@ -1941,6 +2220,11 @@ namespace GakumasMod::Runtime {
             size_t extraCreated = 0;
             std::unordered_map<std::string, UnityResolve::UnityType::Transform*> extraTransforms;
             for (const auto& extra : extraBones) {
+                if (const auto existing = existingCreatedBones.find(extra.name);
+                    existing != existingCreatedBones.end()) {
+                    extraTransforms[extra.name] = existing->second;
+                    continue;
+                }
                 const auto parent = std::find_if(sidecarBones.begin(), sidecarBones.end(),
                     [&](const LocalIpBone& bone) { return bone.name == extra.parentName; });
                 UnityResolve::UnityType::Transform* parentTransform = nullptr;
@@ -2442,18 +2726,193 @@ namespace GakumasMod::Runtime {
             return pairs;
         }
 
+        void* GetRendererSharedMaterials(void* renderer) {
+            static auto method = Il2cppUtils::GetMethod(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "Renderer", "get_sharedMaterials");
+            if (!renderer || !method || !method->function) return nullptr;
+            using Fn = void* (*)(void*, void*);
+            return reinterpret_cast<Fn>(method->function)(renderer, method->address);
+        }
+
+        bool SetRendererSharedMaterials(void* renderer, void* materialsObject) {
+            static auto method = Il2cppUtils::GetMethod(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "Renderer", "set_sharedMaterials",
+                { "UnityEngine.Material[]" });
+            if (!renderer || !materialsObject || !method || !method->function) return false;
+            using Fn = void (*)(void*, void*, void*);
+            t_internalMaterialAssignment = true;
+            reinterpret_cast<Fn>(method->function)(renderer, materialsObject, method->address);
+            t_internalMaterialAssignment = false;
+            {
+                std::lock_guard lock(g_materialOverrideMutex);
+                g_rendererTextureOverrideCache.erase(renderer);
+            }
+            return true;
+        }
+
+        int GetShaderPropertyId(const std::string& propertyName) {
+            if (!g_shaderPropertyToIdMethod) {
+                g_shaderPropertyToIdMethod = Il2cppUtils::GetMethod(
+                    "UnityEngine.CoreModule.dll", "UnityEngine", "Shader", "PropertyToID",
+                    { "System.String" });
+            }
+            if (!g_shaderPropertyToIdMethod || !g_shaderPropertyToIdMethod->function) return -1;
+            using Fn = int (*)(Il2cppString*, void*);
+            return reinterpret_cast<Fn>(g_shaderPropertyToIdMethod->function)(
+                Il2cppString::New(propertyName),
+                g_shaderPropertyToIdMethod->address);
+        }
+
+        bool SetMaterialTexture(void* material, const int propertyId, void* texture) {
+            if (!g_materialSetTextureMethod) {
+                g_materialSetTextureMethod = Il2cppUtils::GetMethod(
+                    "UnityEngine.CoreModule.dll", "UnityEngine", "Material", "SetTexture",
+                    { "System.Int32", "UnityEngine.Texture" });
+            }
+            if (!material || propertyId < 0 || !texture
+                || !g_materialSetTextureMethod || !g_materialSetTextureMethod->function) {
+                return false;
+            }
+            using Fn = void (*)(void*, int, void*, void*);
+            reinterpret_cast<Fn>(g_materialSetTextureMethod->function)(
+                material, propertyId, texture, g_materialSetTextureMethod->address);
+            return true;
+        }
+
+        void RegisterPersistentMaterialTextureOverride(void* material, const int propertyId,
+            const std::string& propertyName, void* texture) {
+            if (!material || propertyId < 0 || !texture) return;
+            std::lock_guard lock(g_materialOverrideMutex);
+            auto& overrides = g_materialTextureOverrides[material];
+            if (const auto iter = std::find_if(overrides.begin(), overrides.end(),
+                [propertyId](const auto& entry) { return entry.propertyId == propertyId; });
+                iter != overrides.end()) {
+                iter->propertyName = propertyName;
+                iter->texture = texture;
+            }
+            else {
+                overrides.emplace_back(PersistentMaterialTextureOverride{
+                    propertyId,
+                    propertyName,
+                    texture,
+                });
+            }
+            g_rendererTextureOverrideCache.clear();
+        }
+
+        std::vector<PersistentMaterialTextureOverride> GetRegisteredMaterialTextureOverrides(void* material) {
+            if (!material) return {};
+            std::lock_guard lock(g_materialOverrideMutex);
+            if (const auto iter = g_materialTextureOverrides.find(material);
+                iter != g_materialTextureOverrides.end()) {
+                return iter->second;
+            }
+            return {};
+        }
+
+        std::vector<RendererSlotTextureOverrides> CollectRendererTextureOverrides(void* renderer) {
+            if (!renderer) return {};
+            {
+                std::lock_guard lock(g_materialOverrideMutex);
+                if (const auto iter = g_rendererTextureOverrideCache.find(renderer);
+                    iter != g_rendererTextureOverrideCache.end()) {
+                    return iter->second;
+                }
+            }
+
+            std::vector<RendererSlotTextureOverrides> result;
+            const auto materials = reinterpret_cast<UnityArray<void*>*>(GetRendererSharedMaterials(renderer));
+            if (!materials) return result;
+
+            for (std::uintptr_t i = 0; i < materials->max_length; ++i) {
+                auto overrides = GetRegisteredMaterialTextureOverrides(
+                    materials->At(static_cast<unsigned int>(i)));
+                if (!overrides.empty()) {
+                    result.emplace_back(RendererSlotTextureOverrides{
+                        static_cast<int>(i),
+                        std::move(overrides),
+                    });
+                }
+            }
+            {
+                std::lock_guard lock(g_materialOverrideMutex);
+                g_rendererTextureOverrideCache[renderer] = result;
+            }
+            return result;
+        }
+
+        void* ClonePrivateMaterial(void* material, const std::string& sourceName,
+            const size_t rendererIndex, const size_t materialIndex) {
+            if (!material) return nullptr;
+
+            using CloneFn = void* (*)(void*);
+            static auto Object_InternalCloneSingle = reinterpret_cast<CloneFn>(
+                Il2cppUtils::il2cpp_resolve_icall("UnityEngine.Object::Internal_CloneSingle(UnityEngine.Object)"));
+            auto clone = Object_InternalCloneSingle ? Object_InternalCloneSingle(material) : nullptr;
+
+            if (!clone) {
+                static auto Object_Instantiate = Il2cppUtils::GetMethod(
+                    "UnityEngine.CoreModule.dll", "UnityEngine", "Object", "Instantiate",
+                    { "UnityEngine.Object" });
+                if (Object_Instantiate && Object_Instantiate->function) {
+                    using InstantiateFn = void* (*)(void*, void*);
+                    clone = reinterpret_cast<InstantiateFn>(Object_Instantiate->function)(
+                        material, Object_Instantiate->address);
+                }
+            }
+            if (!clone) {
+                Log::ErrorFmt("[ModAsset] Failed to clone private material: %s renderer=%zu slot=%zu material=%p",
+                    sourceName.c_str(), rendererIndex, materialIndex, material);
+                return nullptr;
+            }
+
+            const auto handle = UnityResolve::Invoke<Il2CppGCHandle>("il2cpp_gchandle_new", clone, false);
+            {
+                std::lock_guard lock(g_materialOverrideMutex);
+                g_privateMaterials.emplace(clone);
+                if (handle) g_runtimeMaterialHandles.emplace_back(handle);
+            }
+            Log::InfoFmt("[ModAsset] Cloned private material: %s renderer=%zu slot=%zu source=%p clone=%p",
+                sourceName.c_str(), rendererIndex, materialIndex, material, clone);
+            return clone;
+        }
+
+        bool EnsureRendererPrivateMaterials(void* renderer, void* materialsObject,
+            const LocalModAssetReplacement& replacement, const size_t rendererIndex) {
+            const auto materials = reinterpret_cast<UnityArray<void*>*>(materialsObject);
+            if (!renderer || !materials) return false;
+
+            bool changed = false;
+            for (std::uintptr_t i = 0; i < materials->max_length; ++i) {
+                const auto material = materials->At(static_cast<unsigned int>(i));
+                if (!material) continue;
+
+                bool alreadyPrivate = false;
+                {
+                    std::lock_guard lock(g_materialOverrideMutex);
+                    alreadyPrivate = g_privateMaterials.contains(material);
+                }
+                if (alreadyPrivate) continue;
+
+                if (const auto clone = ClonePrivateMaterial(
+                    material, replacement.sourceName, rendererIndex, static_cast<size_t>(i))) {
+                    materials->At(static_cast<unsigned int>(i)) = clone;
+                    changed = true;
+                }
+            }
+
+            if (changed && !SetRendererSharedMaterials(renderer, materialsObject)) {
+                Log::ErrorFmt("[ModAsset] Failed to assign private materials: %s renderer=%zu",
+                    replacement.sourceName.c_str(), rendererIndex);
+                return false;
+            }
+            return changed;
+        }
+
         bool ApplyMaterialTextureReplacements(void* renderer, void* materialsObject,
             const LocalModAssetReplacement& replacement, const size_t rendererIndex) {
             const auto materials = reinterpret_cast<UnityArray<void*>*>(materialsObject);
             if (!materials) return false;
-
-            static auto Material_SetTexture = reinterpret_cast<void (*)(void*, Il2cppString*, void*)>(
-                Il2cppUtils::GetMethodPointer("UnityEngine.CoreModule.dll", "UnityEngine", "Material",
-                    "SetTexture", { "System.String", "UnityEngine.Texture" }));
-            if (!Material_SetTexture) {
-                Log::Error("[ModAsset] Cannot resolve Material.SetTexture.");
-                return false;
-            }
 
             const auto activeRendererName = GetUnityObjectNameString(renderer);
             size_t applied = 0;
@@ -2482,7 +2941,17 @@ namespace GakumasMod::Runtime {
 
                 const auto material = materials->At(static_cast<unsigned int>(textureReplacement.materialSlot));
                 if (!material) continue;
-                Material_SetTexture(material, Il2cppString::New(textureReplacement.propertyName), textureAsset);
+                const auto propertyId = GetShaderPropertyId(textureReplacement.propertyName);
+                if (!SetMaterialTexture(material, propertyId, textureAsset)) {
+                    Log::ErrorFmt("[ModAsset] Material.SetTexture failed: %s renderer=%zu slot=%d property=%s",
+                        replacement.sourceName.c_str(),
+                        rendererIndex,
+                        textureReplacement.materialSlot,
+                        textureReplacement.propertyName.c_str());
+                    continue;
+                }
+                RegisterPersistentMaterialTextureOverride(
+                    material, propertyId, textureReplacement.propertyName, textureAsset);
                 ++applied;
                 Log::InfoFmt("[ModAsset] Applied material texture: %s renderer=%zu rendererName=\"%s\" slot=%d property=%s texture=%s result=%p",
                     replacement.sourceName.c_str(),
@@ -2501,10 +2970,10 @@ namespace GakumasMod::Runtime {
             return applied > 0;
         }
 
-        bool ApplyMaterialSlotCopies(void* renderer, void* materialsObject, void (*setSharedMaterials)(void*, void*),
+        bool ApplyMaterialSlotCopies(void* renderer, void* materialsObject,
             const LocalModAssetReplacement& replacement, const size_t rendererIndex) {
             const auto materials = reinterpret_cast<UnityArray<void*>*>(materialsObject);
-            if (!renderer || !materials || !setSharedMaterials || replacement.materialCopies.empty()) {
+            if (!renderer || !materials || replacement.materialCopies.empty()) {
                 return false;
             }
 
@@ -2552,7 +3021,7 @@ namespace GakumasMod::Runtime {
             }
 
             if (applied > 0) {
-                setSharedMaterials(renderer, materialsObject);
+                SetRendererSharedMaterials(renderer, materialsObject);
                 Log::InfoFmt("[ModAsset] Material slot copy finished: %s renderer=%zu applied=%zu",
                     replacement.sourceName.c_str(), rendererIndex, applied);
                 return true;
@@ -2768,6 +3237,300 @@ namespace GakumasMod::Runtime {
                 renderers.size());
         }
 
+        std::vector<void*> CopyObjectArray(UnityArray<void*>* array) {
+            std::vector<void*> result;
+            if (!array) return result;
+            result.reserve(array->max_length);
+            for (std::uintptr_t index = 0; index < array->max_length; ++index) {
+                result.push_back(array->At(static_cast<unsigned int>(index)));
+            }
+            return result;
+        }
+
+        std::vector<std::string> CopyObjectNames(UnityArray<void*>* array) {
+            std::vector<std::string> result;
+            if (!array) return result;
+            result.reserve(array->max_length);
+            for (std::uintptr_t index = 0; index < array->max_length; ++index) {
+                result.push_back(GetUnityObjectNameString(
+                    array->At(static_cast<unsigned int>(index))));
+            }
+            return result;
+        }
+
+        void RememberLoadedSourceGameObject(
+            const std::string& sourceName,
+            void* gameObject) {
+            if (!gameObject || std::strcmp(GetUnityObjectClassName(gameObject), "GameObject") != 0) {
+                return;
+            }
+            const auto key = NormalizeAssetName(sourceName);
+            bool isRegisteredSource = false;
+            {
+                std::shared_lock replacementLock(g_replacementMutex);
+                isRegisteredSource = std::any_of(
+                    g_registeredReplacements.begin(),
+                    g_registeredReplacements.end(),
+                    [&key](const auto& replacement) {
+                        return replacement
+                            && NormalizeAssetName(replacement->sourceName) == key;
+                    });
+            }
+            if (!isRegisteredSource) return;
+
+            std::lock_guard lock(g_reversiblePatchMutex);
+            auto& objects = g_loadedSourceGameObjects[key];
+            if (std::find(objects.begin(), objects.end(), gameObject) == objects.end()) {
+                objects.push_back(gameObject);
+            }
+        }
+
+        void RegisterReversibleRendererPatch(
+            const LocalModAssetReplacement& replacement,
+            void* renderer,
+            void* originalMesh,
+            const int sourceRootDepth,
+            const std::vector<void*>& originalMaterials,
+            const std::vector<std::string>& originalBoneNames,
+            const std::string& originalRootBoneName,
+            void* patchedMesh,
+            UnityArray<void*>* patchedMaterials) {
+            if (!renderer) return;
+
+            ReversibleRendererPatch patch{};
+            patch.modId = replacement.modId;
+            patch.sourceName = replacement.sourceName;
+            patch.patchedRenderer = renderer;
+            patch.patchedMesh = patchedMesh;
+            patch.originalMesh = originalMesh;
+            patch.sourceRootDepth = sourceRootDepth;
+            patch.originalMaterials = originalMaterials;
+            patch.originalBoneNames = originalBoneNames;
+            patch.originalRootBoneName = originalRootBoneName;
+
+            const auto currentMaterials = CopyObjectArray(patchedMaterials);
+            patch.patchedMaterials = currentMaterials;
+            for (size_t index = 0; index < currentMaterials.size(); ++index) {
+                const auto original = index < patch.originalMaterials.size()
+                    ? patch.originalMaterials[index]
+                    : nullptr;
+                if (currentMaterials[index] && currentMaterials[index] != original) {
+                    patch.patchedMaterialKeys.push_back(currentMaterials[index]);
+                }
+            }
+
+            if ((!patch.patchedMesh || patch.patchedMesh == patch.originalMesh)
+                && patch.patchedMaterialKeys.empty()) {
+                return;
+            }
+
+            std::lock_guard lock(g_reversiblePatchMutex);
+            const auto duplicate = std::find_if(
+                g_reversibleRendererPatches.begin(),
+                g_reversibleRendererPatches.end(),
+                [&patch](const auto& existing) {
+                    return existing.modId == patch.modId
+                        && existing.patchedRenderer == patch.patchedRenderer
+                        && existing.patchedMesh == patch.patchedMesh;
+                });
+            if (duplicate == g_reversibleRendererPatches.end()) {
+                g_reversibleRendererPatches.push_back(std::move(patch));
+            }
+        }
+
+        UnityResolve::UnityType::Transform* FindTransformByName(
+            void* hierarchyRoot,
+            const std::string& name) {
+            if (!hierarchyRoot || name.empty()) return nullptr;
+            const auto transformClass = Il2cppUtils::GetClass(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "Transform");
+            if (!transformClass) return nullptr;
+            const auto rootGameObject = reinterpret_cast<UnityResolve::UnityType::Transform*>(
+                hierarchyRoot)->GetGameObject();
+            if (!rootGameObject) return nullptr;
+            const auto transforms = rootGameObject->GetComponentsInChildren<void*>(
+                transformClass, true);
+            for (const auto transform : transforms) {
+                if (GetUnityObjectNameString(transform) == name) {
+                    return reinterpret_cast<UnityResolve::UnityType::Transform*>(transform);
+                }
+            }
+            return nullptr;
+        }
+
+        UnityArray<void*>* BuildRestoredBoneArray(
+            void* renderer,
+            const ReversibleRendererPatch& patch) {
+            const auto transformClass = Il2cppUtils::GetClass(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "Transform");
+            if (!transformClass) return nullptr;
+            if (patch.originalBoneNames.empty()) {
+                return UnityArray<void*>::New(transformClass, 0);
+            }
+            const auto root = GetHierarchyRoot(renderer);
+            if (!root) return nullptr;
+
+            auto restored = UnityArray<void*>::New(
+                transformClass, patch.originalBoneNames.size());
+            for (size_t index = 0; index < patch.originalBoneNames.size(); ++index) {
+                const auto bone = FindTransformByName(root, patch.originalBoneNames[index]);
+                if (!bone) {
+                    Log::ErrorFmt(
+                        "[ModAsset] Hot restore missing original bone: mod=%s source=%s renderer=%s bone=%s",
+                        patch.modId.c_str(),
+                        patch.sourceName.c_str(),
+                        GetUnityObjectNameString(renderer).c_str(),
+                        patch.originalBoneNames[index].c_str());
+                    return nullptr;
+                }
+                restored->At(static_cast<unsigned int>(index)) = bone;
+            }
+            return restored;
+        }
+
+        UnityArray<void*>* BuildRestoredMaterialArray(
+            const ReversibleRendererPatch& patch) {
+            const auto materialClass = Il2cppUtils::GetClass(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "Material");
+            if (!materialClass) return nullptr;
+            auto restored = UnityArray<void*>::New(
+                materialClass, patch.originalMaterials.size());
+            for (size_t index = 0; index < patch.originalMaterials.size(); ++index) {
+                restored->At(static_cast<unsigned int>(index)) = patch.originalMaterials[index];
+            }
+            return restored;
+        }
+
+        bool RendererMatchesPatch(
+            void* renderer,
+            const ReversibleRendererPatch& patch) {
+            if (!renderer) return false;
+            if (patch.patchedMesh
+                && GetSkinnedMeshRendererSharedMesh(renderer) == patch.patchedMesh) {
+                return true;
+            }
+            const auto materials = reinterpret_cast<UnityArray<void*>*>(
+                GetRendererSharedMaterials(renderer));
+            if (!materials || patch.patchedMaterialKeys.empty()) return false;
+            for (std::uintptr_t index = 0; index < materials->max_length; ++index) {
+                const auto material = materials->At(static_cast<unsigned int>(index));
+                if (std::find(
+                        patch.patchedMaterialKeys.begin(),
+                        patch.patchedMaterialKeys.end(),
+                        material) != patch.patchedMaterialKeys.end()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        void ClearRuntimePropertyBlocks(
+            void* renderer,
+            const size_t materialCount) {
+            RestoreRendererPropertyBlockSnapshots(renderer, materialCount);
+            std::lock_guard lock(g_materialOverrideMutex);
+            g_rendererTextureOverrideCache.erase(renderer);
+            g_loggedPersistentRenderers.erase(renderer);
+        }
+
+        size_t RestoreLiveModInstances(const std::string& modId) {
+            std::vector<ReversibleRendererPatch> patches;
+            {
+                std::lock_guard lock(g_reversiblePatchMutex);
+                for (auto iter = g_reversibleRendererPatches.begin();
+                     iter != g_reversibleRendererPatches.end();) {
+                    if (iter->modId == modId) {
+                        patches.push_back(*iter);
+                        iter = g_reversibleRendererPatches.erase(iter);
+                    }
+                    else {
+                        ++iter;
+                    }
+                }
+            }
+            if (patches.empty()) return 0;
+
+            // Matching reads sharedMesh/sharedMaterials off a renderer list that
+            // was snapshotted before anything was touched.  Restoring writes
+            // bones, mesh, materials and toggles enabled on those same objects.
+            // Interleaving the two meant later iterations kept reading the stale
+            // snapshot through Unity after it had already been mutated, which
+            // crashed inside UnityPlayer.  Match everything first, then write.
+            std::unordered_set<void*> seenRenderers;
+            std::vector<std::pair<void*, const ReversibleRendererPatch*>> matches;
+            for (const auto& patch : patches) {
+                if (!patch.patchedRenderer || !IsNativeObjectAlive(patch.patchedRenderer)
+                    || !RendererMatchesPatch(patch.patchedRenderer, patch)) continue;
+                if (!seenRenderers.emplace(patch.patchedRenderer).second) continue;
+                matches.emplace_back(patch.patchedRenderer, &patch);
+            }
+            // Only sweep the scene for patches whose recorded renderer is gone or
+            // no longer carries the Mod mesh -- a re-instantiated actor.
+            if (matches.size() < patches.size()) {
+                const auto rendererClass = Il2cppUtils::GetClass(
+                    "UnityEngine.CoreModule.dll", "UnityEngine", "SkinnedMeshRenderer");
+                if (!rendererClass) return 0;
+                for (const auto renderer : rendererClass->FindObjectsByType<void*>()) {
+                    if (!renderer || !IsNativeObjectAlive(renderer)
+                        || !seenRenderers.emplace(renderer).second) continue;
+                    const auto patch = std::find_if(
+                        patches.begin(), patches.end(), [renderer](const auto& candidate) {
+                            return RendererMatchesPatch(renderer, candidate);
+                        });
+                    if (patch == patches.end()) continue;
+                    matches.emplace_back(renderer, &*patch);
+                }
+            }
+
+            std::unordered_set<void*> restoredSourceRoots;
+            size_t restoredCount = 0;
+            for (const auto& [renderer, patch] : matches) {
+                const auto restoredBones = BuildRestoredBoneArray(renderer, *patch);
+                if (!restoredBones) continue;
+                const auto restoredMaterials = BuildRestoredMaterialArray(*patch);
+                if (!restoredMaterials) continue;
+
+                SetSkinnedMeshRendererBones(renderer, restoredBones);
+                if (!patch->originalRootBoneName.empty()) {
+                    if (const auto root = GetHierarchyRoot(renderer)) {
+                        SetSkinnedMeshRendererRootBone(
+                            renderer,
+                            FindTransformByName(root, patch->originalRootBoneName));
+                    }
+                }
+                else {
+                    SetSkinnedMeshRendererRootBone(renderer, nullptr);
+                }
+                SetRendererSharedMaterials(renderer, restoredMaterials);
+                SetSkinnedMeshRendererSharedMesh(renderer, patch->originalMesh);
+                ClearRuntimePropertyBlocks(renderer, patch->originalMaterials.size());
+                RefreshSkinnedMeshRendererState(renderer);
+
+                if (const auto sourceRoot = GetSourceRootGameObject(
+                        renderer, patch->sourceRootDepth)) {
+                    restoredSourceRoots.emplace(sourceRoot);
+                }
+                ++restoredCount;
+                Log::InfoFmt(
+                    "[ModAsset] Hot-restored renderer: mod=%s source=%s renderer=%s mesh=%s",
+                    modId.c_str(),
+                    patch->sourceName.c_str(),
+                    GetUnityObjectNameString(renderer).c_str(),
+                    GetUnityObjectNameString(patch->originalMesh).c_str());
+            }
+
+            {
+                std::lock_guard lock(g_reversiblePatchMutex);
+                auto& targets = g_reapplyRootsByMod[modId];
+                for (const auto root : restoredSourceRoots) {
+                    if (std::find(targets.begin(), targets.end(), root) == targets.end()) {
+                        targets.push_back(root);
+                    }
+                }
+            }
+            return restoredCount;
+        }
+
         bool ApplySkinnedMeshReplacement(void* originalGameObject, void* modGameObject,
             const LocalModAssetReplacement& replacement) {
             if (!originalGameObject || !modGameObject) return false;
@@ -2794,10 +3557,6 @@ namespace GakumasMod::Runtime {
                 Il2cppUtils::GetMethodPointer("UnityEngine.CoreModule.dll", "UnityEngine", "SkinnedMeshRenderer", "get_sharedMesh"));
             static auto SkinnedMeshRenderer_set_sharedMesh = reinterpret_cast<void (*)(void*, void*)>(
                 Il2cppUtils::GetMethodPointer("UnityEngine.CoreModule.dll", "UnityEngine", "SkinnedMeshRenderer", "set_sharedMesh"));
-            static auto Renderer_get_sharedMaterials = reinterpret_cast<void* (*)(void*)>(
-                Il2cppUtils::GetMethodPointer("UnityEngine.CoreModule.dll", "UnityEngine", "Renderer", "get_sharedMaterials"));
-            static auto Renderer_set_sharedMaterials = reinterpret_cast<void (*)(void*, void*)>(
-                Il2cppUtils::GetMethodPointer("UnityEngine.CoreModule.dll", "UnityEngine", "Renderer", "set_sharedMaterials"));
             static auto SkinnedMeshRenderer_set_updateWhenOffscreen = reinterpret_cast<void (*)(void*, bool)>(
                 Il2cppUtils::GetMethodPointer("UnityEngine.CoreModule.dll", "UnityEngine", "SkinnedMeshRenderer", "set_updateWhenOffscreen"));
 
@@ -2808,6 +3567,7 @@ namespace GakumasMod::Runtime {
 
             const auto rendererPairs = BuildRendererPairs(originalRenderers, modRenderers, replacement);
             size_t meshApplied = 0;
+            size_t materialApplied = 0;
             size_t textureApplied = 0;
             size_t skippedMeshes = 0;
 
@@ -2815,9 +3575,16 @@ namespace GakumasMod::Runtime {
                 const auto& pair = rendererPairs[pairIndex];
                 const auto originalMesh = SkinnedMeshRenderer_get_sharedMesh(pair.originalRenderer);
                 const auto sourceModMesh = SkinnedMeshRenderer_get_sharedMesh(pair.modRenderer);
-                const auto originalMaterials = Renderer_get_sharedMaterials ? Renderer_get_sharedMaterials(pair.originalRenderer) : nullptr;
-                const auto modMaterials = Renderer_get_sharedMaterials ? Renderer_get_sharedMaterials(pair.modRenderer) : nullptr;
+                const auto originalMaterials = GetRendererSharedMaterials(pair.originalRenderer);
+                const auto modMaterials = GetRendererSharedMaterials(pair.modRenderer);
+                const auto originalMaterialSnapshot = CopyObjectArray(
+                    reinterpret_cast<UnityArray<void*>*>(originalMaterials));
+                const auto originalBoneNames = CopyObjectNames(
+                    GetSkinnedMeshRendererBones(pair.originalRenderer));
+                const auto originalRootBoneName = GetUnityObjectNameString(
+                    GetSkinnedMeshRendererRootBone(pair.originalRenderer));
                 void* appliedMesh = nullptr;
+                bool rendererMaterialApplied = false;
 
                 LogSkinnedMeshRendererDiagnostics(sourceName, pair.originalIndex, pair.originalRenderer, pair.modRenderer,
                     originalMesh, sourceModMesh, "before");
@@ -2857,22 +3624,54 @@ namespace GakumasMod::Runtime {
                         GetUnityObjectNameString(pair.modRenderer).c_str());
                 }
 
-                if (replacement.replaceMaterials && modMaterials && Renderer_set_sharedMaterials) {
-                    Renderer_set_sharedMaterials(pair.originalRenderer, modMaterials);
+                if (replacement.replaceMaterials && modMaterials) {
+                    rendererMaterialApplied |= SetRendererSharedMaterials(
+                        pair.originalRenderer, modMaterials);
                 }
-                const auto activeMaterials = replacement.replaceMaterials && modMaterials ? modMaterials : originalMaterials;
-                ApplyMaterialSlotCopies(pair.originalRenderer, activeMaterials, Renderer_set_sharedMaterials,
-                    replacement, pair.originalIndex);
-                ApplyMaterialColorReplacements(pair.originalRenderer, activeMaterials, replacement, pair.originalIndex);
-                ApplyMaterialFloatReplacements(pair.originalRenderer, activeMaterials, replacement, pair.originalIndex);
+                const auto activeMaterials = replacement.replaceMaterials && modMaterials
+                    ? modMaterials
+                    : originalMaterials;
+                if (!replacement.replaceMaterials
+                    && (!replacement.materialCopies.empty()
+                        || !replacement.materialTextures.empty()
+                        || !replacement.materialColors.empty()
+                        || !replacement.materialFloats.empty())) {
+                    rendererMaterialApplied |= EnsureRendererPrivateMaterials(
+                        pair.originalRenderer, activeMaterials, replacement, pair.originalIndex);
+                }
+                rendererMaterialApplied |= ApplyMaterialSlotCopies(
+                    pair.originalRenderer, activeMaterials, replacement, pair.originalIndex);
+                rendererMaterialApplied |= ApplyMaterialColorReplacements(
+                    pair.originalRenderer, activeMaterials, replacement, pair.originalIndex);
+                rendererMaterialApplied |= ApplyMaterialFloatReplacements(
+                    pair.originalRenderer, activeMaterials, replacement, pair.originalIndex);
                 if (ApplyMaterialTextureReplacements(pair.originalRenderer, activeMaterials, replacement, pair.originalIndex)) {
+                    rendererMaterialApplied = true;
                     ++textureApplied;
                 }
+                // Commit persistent texture overrides immediately.  The game's
+                // later SetMaterialArray/Renderer.set_sharedMaterials call is
+                // handled by the material-assignment hook below and will restore
+                // this complete Mod material array after its write.
+                ApplyPersistentTextureOverrides(pair.originalRenderer);
+                if (rendererMaterialApplied) ++materialApplied;
                 if (SkinnedMeshRenderer_set_updateWhenOffscreen) {
                     SkinnedMeshRenderer_set_updateWhenOffscreen(pair.originalRenderer, true);
                 }
 
                 const auto currentOriginalMesh = SkinnedMeshRenderer_get_sharedMesh(pair.originalRenderer);
+                RegisterReversibleRendererPatch(
+                    replacement,
+                    pair.originalRenderer,
+                    originalMesh,
+                    GetComponentDepthFromRoot(pair.originalRenderer, originalGameObject),
+                    originalMaterialSnapshot,
+                    originalBoneNames,
+                    originalRootBoneName,
+                    currentOriginalMesh,
+                    reinterpret_cast<UnityArray<void*>*>(
+                        GetRendererSharedMaterials(pair.originalRenderer)));
+                RefreshSkinnedMeshRendererState(pair.originalRenderer);
                 LogSkinnedMeshRendererDiagnostics(sourceName, pair.originalIndex, pair.originalRenderer, pair.modRenderer,
                     currentOriginalMesh, appliedMesh ? appliedMesh : sourceModMesh, "after");
 
@@ -2888,18 +3687,225 @@ namespace GakumasMod::Runtime {
                     replacement.replaceMaterials ? 1 : 0);
             }
 
-            Log::InfoFmt("[ModAsset] SkinnedMeshRenderer replacement finished: %s originalRenderers=%zu replacementRenderers=%zu pairs=%zu meshApplied=%zu textureApplied=%zu skippedMeshes=%zu",
+            Log::InfoFmt("[ModAsset] SkinnedMeshRenderer replacement finished: %s originalRenderers=%zu replacementRenderers=%zu pairs=%zu meshApplied=%zu materialApplied=%zu textureApplied=%zu skippedMeshes=%zu",
                 sourceName.c_str(),
                 originalRenderers.size(),
                 modRenderers.size(),
                 rendererPairs.size(),
                 meshApplied,
+                materialApplied,
                 textureApplied,
                 skippedMeshes);
-            return meshApplied > 0 || textureApplied > 0;
+            return meshApplied > 0 || materialApplied > 0;
+        }
+
+        void AddUniqueLiveObject(std::vector<void*>& objects, void* object) {
+            if (!object || !IsNativeObjectAlive(object)
+                || std::find(objects.begin(), objects.end(), object) != objects.end()) {
+                return;
+            }
+            objects.push_back(object);
+        }
+
+        bool IsGameObjectInsideRigRoot(
+            void* gameObject,
+            void* rigRootTransform) {
+            if (!gameObject || !rigRootTransform) return false;
+            auto current = reinterpret_cast<UnityResolve::UnityType::GameObject*>(
+                gameObject)->GetTransform();
+            while (current && IsNativeObjectAlive(current)) {
+                if (current == rigRootTransform) return true;
+                current = current->GetParent();
+            }
+            return false;
+        }
+
+        bool ReactivateGameObject(void* gameObject) {
+            if (!gameObject || !IsNativeObjectAlive(gameObject)) return false;
+            static auto getActiveSelf = Il2cppUtils::GetMethod(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "GameObject", "get_activeSelf");
+            static auto setActive = Il2cppUtils::GetMethod(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "GameObject", "SetActive",
+                { "System.Boolean" });
+            if (!getActiveSelf || !getActiveSelf->function
+                || !setActive || !setActive->function) {
+                return false;
+            }
+
+            using GetActiveFn = bool (*)(void*, void*);
+            using SetActiveFn = void (*)(void*, bool, void*);
+            const auto activeSelf = reinterpret_cast<GetActiveFn>(getActiveSelf->function)(
+                gameObject, getActiveSelf->address);
+            if (!activeSelf) return false;
+            reinterpret_cast<SetActiveFn>(setActive->function)(
+                gameObject, false, setActive->address);
+            reinterpret_cast<SetActiveFn>(setActive->function)(
+                gameObject, true, setActive->address);
+            return true;
+        }
+
+        size_t RefreshAnimationRigsAfterHotReapply(
+            const std::vector<void*>& targets) {
+            std::vector<ActiveAnimationRigContext> contexts;
+            {
+                std::lock_guard lock(g_animationRigMutex);
+                std::erase_if(g_activeAnimationRigs, [](const auto& context) {
+                    return !context.rig
+                        || !context.rootTransform
+                        || !context.rootGameObject
+                        || !IsNativeObjectAlive(context.rig)
+                        || !IsNativeObjectAlive(context.rootTransform)
+                        || !IsNativeObjectAlive(context.rootGameObject);
+                });
+                contexts = g_activeAnimationRigs;
+            }
+
+            size_t refreshed = 0;
+            for (const auto& context : contexts) {
+                std::vector<void*> matchingTargets;
+                for (const auto target : targets) {
+                    if (IsGameObjectInsideRigRoot(target, context.rootTransform)) {
+                        AddUniqueLiveObject(matchingTargets, target);
+                    }
+                }
+                if (matchingTargets.empty()) continue;
+
+                const auto addedBones = AddActorSwingBonesToAnimationData(
+                    context.rootTransform, context.initializeData);
+                const auto addedChains = AddActorSwingChainsToAnimationData(
+                    context.rootTransform, context.initializeData);
+                if (addedBones > 0 || addedChains > 0) {
+                    CampusActorAnimationRig_RegisterBones_Orig(
+                        context.rig, context.initializeData);
+                }
+
+                size_t reactivatedTargets = 0;
+                for (const auto target : matchingTargets) {
+                    if (ReactivateGameObject(target)) ++reactivatedTargets;
+                }
+                if (reactivatedTargets > 0 || addedBones > 0 || addedChains > 0) {
+                    ++refreshed;
+                    Log::InfoFmt(
+                        "[ModAsset] Hot-refreshed active character target: root=%s reactivatedTargets=%zu addedBones=%zu addedChains=%zu",
+                        GetUnityObjectNameString(context.rootGameObject).c_str(),
+                        reactivatedTargets,
+                        addedBones,
+                        addedChains);
+                }
+            }
+            return refreshed;
+        }
+
+        std::vector<void*> CollectLiveReapplyTargets(
+            const LocalModAssetReplacement& replacement) {
+            struct SourceRendererIdentity {
+                void* mesh{};
+                int depthFromSourceRoot{};
+                std::string rendererName;
+            };
+
+            std::vector<void*> targets;
+            std::vector<void*> rememberedSources;
+            {
+                std::lock_guard lock(g_reversiblePatchMutex);
+                if (const auto restored = g_reapplyRootsByMod.find(replacement.modId);
+                    restored != g_reapplyRootsByMod.end()) {
+                    for (const auto root : restored->second) AddUniqueLiveObject(targets, root);
+                }
+                if (const auto remembered = g_loadedSourceGameObjects.find(
+                        NormalizeAssetName(replacement.sourceName));
+                    remembered != g_loadedSourceGameObjects.end()) {
+                    rememberedSources = remembered->second;
+                }
+            }
+
+            const auto rendererClass = Il2cppUtils::GetClass(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "SkinnedMeshRenderer");
+            if (!rendererClass) return targets;
+
+            std::vector<SourceRendererIdentity> sourceRenderers;
+            for (const auto source : rememberedSources) {
+                if (!source || !IsNativeObjectAlive(source)) continue;
+                AddUniqueLiveObject(targets, source);
+                const auto renderers = reinterpret_cast<UnityResolve::UnityType::GameObject*>(
+                    source)->GetComponentsInChildren<void*>(rendererClass, true);
+                for (const auto renderer : renderers) {
+                    const auto mesh = GetSkinnedMeshRendererSharedMesh(renderer);
+                    if (!mesh) continue;
+                    const SourceRendererIdentity identity{
+                        mesh,
+                        GetComponentDepthFromRoot(renderer, source),
+                        GetUnityObjectNameString(renderer),
+                    };
+                    const auto duplicate = std::find_if(
+                        sourceRenderers.begin(), sourceRenderers.end(),
+                        [&identity](const auto& current) {
+                            return current.mesh == identity.mesh
+                                && current.depthFromSourceRoot == identity.depthFromSourceRoot
+                                && current.rendererName == identity.rendererName;
+                        });
+                    if (duplicate == sourceRenderers.end()) sourceRenderers.push_back(identity);
+                }
+            }
+
+            if (!sourceRenderers.empty()) {
+                const auto renderers = rendererClass->FindObjectsByType<void*>();
+                for (const auto renderer : renderers) {
+                    if (!renderer || !IsNativeObjectAlive(renderer)) continue;
+                    const auto mesh = GetSkinnedMeshRendererSharedMesh(renderer);
+                    const auto rendererName = GetUnityObjectNameString(renderer);
+                    const auto identity = std::find_if(
+                        sourceRenderers.begin(), sourceRenderers.end(),
+                        [mesh, &rendererName](const auto& current) {
+                            return current.mesh == mesh
+                                && (current.rendererName.empty()
+                                    || current.rendererName == rendererName);
+                        });
+                    if (identity == sourceRenderers.end()) continue;
+                    AddUniqueLiveObject(
+                        targets,
+                        GetSourceRootGameObject(renderer, identity->depthFromSourceRoot));
+                }
+            }
+            return targets;
+        }
+
+        size_t ReapplyLiveModInstances(LocalModAssetReplacement& replacement) {
+            if (replacement.replaceWholeObject || replacement.attachToOriginal) {
+                Log::WarnFmt(
+                    "[ModAsset] Hot reapply unsupported for whole-object/attach rule: mod=%s source=%s",
+                    replacement.modId.c_str(),
+                    replacement.sourceName.c_str());
+                return 0;
+            }
+
+            const auto targets = CollectLiveReapplyTargets(replacement);
+            if (targets.empty()) return 0;
+            const auto modAsset = LoadLocalModReplacementAsset(replacement);
+            if (!modAsset) return 0;
+
+            size_t applied = 0;
+            for (const auto target : targets) {
+                if (ApplySkinnedMeshReplacement(target, modAsset, replacement)) ++applied;
+            }
+            for (const auto target : targets) {
+                Log::InfoFmt("[ModAsset] Hot reapply target: object=%p name=\"%s\"",
+                    target,
+                    GetUnityObjectNameString(target).c_str());
+            }
+            const auto refreshedRigs = RefreshAnimationRigsAfterHotReapply(targets);
+            Log::InfoFmt(
+                "[ModAsset] Hot reapply finished: mod=%s source=%s targets=%zu applied=%zu refreshedRigs=%zu",
+                replacement.modId.c_str(),
+                replacement.sourceName.c_str(),
+                targets.size(),
+                applied,
+                refreshedRigs);
+            return applied;
         }
 
         void* ReplaceLocalModAssetIfNeeded(void* originalResult, const std::string& sourceName) {
+            RememberLoadedSourceGameObject(sourceName, originalResult);
             const auto replacement = FindLocalModAssetReplacement(sourceName);
             if (!replacement) return originalResult;
 
@@ -3032,6 +4038,541 @@ namespace GakumasMod::Runtime {
             return result;
         }
 
+        bool ResolvePersistentPropertyBlockMethods() {
+            g_rendererSetPropertyBlockMethod = Il2cppUtils::GetMethod(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "Renderer", "SetPropertyBlock",
+                { "UnityEngine.MaterialPropertyBlock" });
+            g_rendererSetPropertyBlockMaterialIndexMethod = Il2cppUtils::GetMethod(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "Renderer", "SetPropertyBlock",
+                { "UnityEngine.MaterialPropertyBlock", "System.Int32" });
+            g_rendererGetPropertyBlockMethod = Il2cppUtils::GetMethod(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "Renderer", "GetPropertyBlock",
+                { "UnityEngine.MaterialPropertyBlock" });
+            g_rendererGetPropertyBlockMaterialIndexMethod = Il2cppUtils::GetMethod(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "Renderer", "GetPropertyBlock",
+                { "UnityEngine.MaterialPropertyBlock", "System.Int32" });
+            g_materialPropertyBlockSetTextureMethod = Il2cppUtils::GetMethod(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "MaterialPropertyBlock", "SetTexture",
+                { "System.Int32", "UnityEngine.Texture" });
+            g_materialPropertyBlockIsEmptyMethod = Il2cppUtils::GetMethod(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "MaterialPropertyBlock", "get_isEmpty");
+            g_materialSetTextureMethod = Il2cppUtils::GetMethod(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "Material", "SetTexture",
+                { "System.Int32", "UnityEngine.Texture" });
+            g_materialSetTextureStringMethod = Il2cppUtils::GetMethod(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "Material", "SetTexture",
+                { "System.String", "UnityEngine.Texture" });
+
+            return g_rendererSetPropertyBlockMethod && g_rendererSetPropertyBlockMethod->function
+                && g_rendererSetPropertyBlockMaterialIndexMethod
+                && g_rendererSetPropertyBlockMaterialIndexMethod->function
+                && g_rendererGetPropertyBlockMethod && g_rendererGetPropertyBlockMethod->function
+                && g_rendererGetPropertyBlockMaterialIndexMethod
+                && g_rendererGetPropertyBlockMaterialIndexMethod->function
+                && g_materialPropertyBlockSetTextureMethod
+                && g_materialPropertyBlockSetTextureMethod->function
+                && g_materialPropertyBlockIsEmptyMethod
+                && g_materialPropertyBlockIsEmptyMethod->function
+                && g_materialSetTextureMethod && g_materialSetTextureMethod->function
+                && g_materialSetTextureStringMethod && g_materialSetTextureStringMethod->function;
+        }
+
+        void* CreateMaterialPropertyBlock() {
+            const auto klass = Il2cppUtils::GetClass(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "MaterialPropertyBlock");
+            const auto block = klass
+                ? UnityResolve::Invoke<void*>("il2cpp_object_new", klass->address)
+                : nullptr;
+            const auto ctor = Il2cppUtils::GetMethod(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "MaterialPropertyBlock", ".ctor");
+            if (!block || !ctor || !ctor->address) {
+                Log::Error("[ModAsset] Cannot create MaterialPropertyBlock scratch object.");
+                return nullptr;
+            }
+
+            void* exception{};
+            UnityResolve::Invoke<void*>(
+                "il2cpp_runtime_invoke", ctor->address, block, nullptr, &exception);
+            if (exception) {
+                Log::Error("[ModAsset] MaterialPropertyBlock constructor threw.");
+                return nullptr;
+            }
+            return block;
+        }
+
+        void* GetPropertyBlockScratch() {
+            if (g_propertyBlockScratchHandle) {
+                return UnityResolve::Invoke<void*>(
+                    "il2cpp_gchandle_get_target", g_propertyBlockScratchHandle);
+            }
+
+            const auto block = CreateMaterialPropertyBlock();
+            if (!block) return nullptr;
+            g_propertyBlockScratchHandle = UnityResolve::Invoke<Il2CppGCHandle>(
+                "il2cpp_gchandle_new", block, false);
+            return g_propertyBlockScratchHandle ? block : nullptr;
+        }
+
+        void GetRendererPropertyBlock(void* renderer, void* block) {
+            if (!renderer || !block || !g_rendererGetPropertyBlockMethod
+                || !g_rendererGetPropertyBlockMethod->function) {
+                return;
+            }
+            using Fn = void (*)(void*, void*, void*);
+            reinterpret_cast<Fn>(g_rendererGetPropertyBlockMethod->function)(
+                renderer, block, g_rendererGetPropertyBlockMethod->address);
+        }
+
+        void GetRendererPropertyBlock(void* renderer, void* block, const int materialIndex) {
+            if (!renderer || !block || !g_rendererGetPropertyBlockMaterialIndexMethod
+                || !g_rendererGetPropertyBlockMaterialIndexMethod->function) {
+                return;
+            }
+            using Fn = void (*)(void*, void*, int, void*);
+            reinterpret_cast<Fn>(g_rendererGetPropertyBlockMaterialIndexMethod->function)(
+                renderer, block, materialIndex, g_rendererGetPropertyBlockMaterialIndexMethod->address);
+        }
+
+        bool IsMaterialPropertyBlockEmpty(void* block) {
+            if (!block || !g_materialPropertyBlockIsEmptyMethod
+                || !g_materialPropertyBlockIsEmptyMethod->function) {
+                return true;
+            }
+            using Fn = bool (*)(void*, void*);
+            return reinterpret_cast<Fn>(g_materialPropertyBlockIsEmptyMethod->function)(
+                block, g_materialPropertyBlockIsEmptyMethod->address);
+        }
+
+        void CaptureRendererPropertyBlockSnapshot(
+            void* renderer,
+            const int materialIndex,
+            const bool forceRefresh) {
+            if (!renderer || materialIndex < 0) return;
+            {
+                std::lock_guard lock(g_propertyBlockSnapshotMutex);
+                if (!forceRefresh) {
+                    const auto rendererSnapshots = g_rendererPropertyBlockSnapshots.find(renderer);
+                    if (rendererSnapshots != g_rendererPropertyBlockSnapshots.end()
+                        && rendererSnapshots->second.contains(materialIndex)) {
+                        return;
+                    }
+                }
+            }
+
+            const auto block = CreateMaterialPropertyBlock();
+            if (!block) return;
+            GetRendererPropertyBlock(renderer, block, materialIndex);
+            const auto handle = UnityResolve::Invoke<Il2CppGCHandle>(
+                "il2cpp_gchandle_new", block, false);
+            if (!handle) return;
+
+            RendererPropertyBlockSnapshot snapshot{
+                block,
+                handle,
+                IsMaterialPropertyBlockEmpty(block),
+            };
+            std::lock_guard lock(g_propertyBlockSnapshotMutex);
+            auto& destination = g_rendererPropertyBlockSnapshots[renderer][materialIndex];
+            if (destination.handle) {
+                UnityResolve::Invoke<void>("il2cpp_gchandle_free", destination.handle);
+            }
+            destination = snapshot;
+        }
+
+        void RestoreRendererPropertyBlockSnapshots(
+            void* renderer,
+            const size_t materialCount) {
+            if (!renderer) return;
+
+            std::lock_guard scratchLock(g_propertyBlockScratchMutex);
+            std::unordered_set<int> runtimeOwnedSlots;
+            if (const auto owned = g_runtimeOwnedPropertyBlockSlots.find(renderer);
+                owned != g_runtimeOwnedPropertyBlockSlots.end()) {
+                runtimeOwnedSlots = std::move(owned->second);
+                g_runtimeOwnedPropertyBlockSlots.erase(owned);
+            }
+
+            std::unordered_map<int, RendererPropertyBlockSnapshot> snapshots;
+            {
+                std::lock_guard snapshotLock(g_propertyBlockSnapshotMutex);
+                if (const auto rendererSnapshots = g_rendererPropertyBlockSnapshots.find(renderer);
+                    rendererSnapshots != g_rendererPropertyBlockSnapshots.end()) {
+                    snapshots = std::move(rendererSnapshots->second);
+                    g_rendererPropertyBlockSnapshots.erase(rendererSnapshots);
+                }
+            }
+
+            if (Renderer_SetPropertyBlockMaterialIndex_Orig
+                && g_rendererSetPropertyBlockMaterialIndexMethod) {
+                size_t restoredSnapshots = 0;
+                size_t clearedRuntimeSlots = 0;
+                for (size_t index = 0; index < materialCount; ++index) {
+                    const auto materialIndex = static_cast<int>(index);
+                    if (const auto snapshot = snapshots.find(materialIndex);
+                        snapshot != snapshots.end()) {
+                        Renderer_SetPropertyBlockMaterialIndex_Orig(
+                            renderer,
+                            snapshot->second.empty ? nullptr : snapshot->second.block,
+                            materialIndex,
+                            g_rendererSetPropertyBlockMaterialIndexMethod->address);
+                        ++restoredSnapshots;
+                    }
+                    else if (runtimeOwnedSlots.contains(materialIndex)) {
+                        Renderer_SetPropertyBlockMaterialIndex_Orig(
+                            renderer,
+                            nullptr,
+                            materialIndex,
+                            g_rendererSetPropertyBlockMaterialIndexMethod->address);
+                        ++clearedRuntimeSlots;
+                    }
+                }
+                if (restoredSnapshots > 0 || clearedRuntimeSlots > 0) {
+                    Log::InfoFmt(
+                        "[ModAsset] Hot-restored material property blocks: renderer=%s snapshots=%zu clearedRuntimeSlots=%zu",
+                        GetUnityObjectNameString(renderer).c_str(),
+                        restoredSnapshots,
+                        clearedRuntimeSlots);
+                }
+            }
+
+            for (auto& [materialIndex, snapshot] : snapshots) {
+                (void)materialIndex;
+                if (snapshot.handle) {
+                    UnityResolve::Invoke<void>("il2cpp_gchandle_free", snapshot.handle);
+                }
+            }
+        }
+
+        void SetMaterialPropertyBlockTextures(void* block,
+            const std::vector<PersistentMaterialTextureOverride>& textures) {
+            if (!block || !g_materialPropertyBlockSetTextureMethod
+                || !g_materialPropertyBlockSetTextureMethod->function) {
+                return;
+            }
+            using Fn = void (*)(void*, int, void*, void*);
+            const auto setTexture = reinterpret_cast<Fn>(
+                g_materialPropertyBlockSetTextureMethod->function);
+            for (const auto& texture : textures) {
+                if (texture.propertyId < 0 || !texture.texture) continue;
+                setTexture(
+                    block,
+                    texture.propertyId,
+                    texture.texture,
+                    g_materialPropertyBlockSetTextureMethod->address);
+            }
+        }
+
+        void ApplyPersistentTextureOverridesToSlot(void* renderer,
+            const RendererSlotTextureOverrides& slotOverrides,
+            const bool rendererWideUpdated,
+            const bool materialBlockSetByGame = false) {
+            if (!renderer || slotOverrides.materialIndex < 0
+                || !Renderer_SetPropertyBlockMaterialIndex_Orig) {
+                return;
+            }
+
+            std::lock_guard lock(g_propertyBlockScratchMutex);
+            const auto block = GetPropertyBlockScratch();
+            if (!block) return;
+
+            auto& runtimeOwnedSlots = g_runtimeOwnedPropertyBlockSlots[renderer];
+            if (materialBlockSetByGame) {
+                runtimeOwnedSlots.erase(slotOverrides.materialIndex);
+            }
+
+            bool copyRendererBlock = rendererWideUpdated
+                && runtimeOwnedSlots.contains(slotOverrides.materialIndex);
+            if (!copyRendererBlock) {
+                // Preserve a game's existing per-material block. If the slot has none,
+                // mirror the renderer-wide block before adding our texture values because
+                // Unity gives per-material blocks precedence over renderer-wide blocks.
+                GetRendererPropertyBlock(renderer, block, slotOverrides.materialIndex);
+                copyRendererBlock = IsMaterialPropertyBlockEmpty(block);
+                if (!copyRendererBlock) {
+                    CaptureRendererPropertyBlockSnapshot(
+                        renderer,
+                        slotOverrides.materialIndex,
+                        materialBlockSetByGame);
+                }
+            }
+            if (copyRendererBlock) {
+                GetRendererPropertyBlock(renderer, block);
+                runtimeOwnedSlots.emplace(slotOverrides.materialIndex);
+            }
+            SetMaterialPropertyBlockTextures(block, slotOverrides.textures);
+            Renderer_SetPropertyBlockMaterialIndex_Orig(
+                renderer,
+                block,
+                slotOverrides.materialIndex,
+                g_rendererSetPropertyBlockMaterialIndexMethod->address);
+        }
+
+        void ApplyPersistentTextureOverrides(void* renderer) {
+            const auto rendererOverrides = CollectRendererTextureOverrides(renderer);
+            for (const auto& slotOverrides : rendererOverrides) {
+                ApplyPersistentTextureOverridesToSlot(
+                    renderer, slotOverrides, true);
+            }
+            if (!rendererOverrides.empty()) {
+                bool firstApplication = false;
+                {
+                    std::lock_guard lock(g_materialOverrideMutex);
+                    firstApplication = g_loggedPersistentRenderers.emplace(renderer).second;
+                }
+                if (firstApplication) {
+                    Log::InfoFmt("[ModAsset] Persistent material textures active: renderer=%p name=\"%s\" slots=%zu",
+                        renderer,
+                        GetUnityObjectNameString(renderer).c_str(),
+                        rendererOverrides.size());
+                }
+                return;
+            }
+            // Diagnostic complement: a body renderer the game is submitting
+            // property blocks for while carrying no registered overrides is a
+            // different instance from the one hot reapply patched.  That single
+            // fact separates "the commit landed on the wrong object" from "the
+            // commit landed but its content is wrong".
+            const auto name = GetUnityObjectNameString(renderer);
+            if (name.rfind("Geo_", 0) != 0) return;
+            bool firstReport = false;
+            {
+                std::lock_guard lock(g_materialOverrideMutex);
+                firstReport = g_loggedUnmanagedRenderers.emplace(renderer).second;
+            }
+            if (firstReport) {
+                Log::InfoFmt("[ModAsset] Property block on unmanaged renderer: renderer=%p name=\"%s\"",
+                    renderer,
+                    name.c_str());
+            }
+        }
+
+        void Renderer_SetPropertyBlock_Hook(void* self, void* properties, void* methodInfo) {
+            Renderer_SetPropertyBlock_Orig(self, properties, methodInfo);
+            ApplyPersistentTextureOverrides(self);
+        }
+
+        void Renderer_SetPropertyBlockMaterialIndex_Hook(
+            void* self, void* properties, const int materialIndex, void* methodInfo) {
+            Renderer_SetPropertyBlockMaterialIndex_Orig(
+                self, properties, materialIndex, methodInfo);
+            const auto rendererOverrides = CollectRendererTextureOverrides(self);
+            if (const auto iter = std::find_if(
+                rendererOverrides.begin(),
+                rendererOverrides.end(),
+                [materialIndex](const auto& entry) {
+                    return entry.materialIndex == materialIndex;
+                });
+                iter != rendererOverrides.end()) {
+                ApplyPersistentTextureOverridesToSlot(
+                    self, *iter, false, true);
+            }
+        }
+
+        // Last unexamined writer for "hot reapply looks wrong until a page
+        // switch": the game reassigning the renderer's material array after we
+        // patched it. Renderer.SetPropertyBlock and Material.SetTexture were
+        // both ruled out by probes, so preserve the complete Mod material array
+        // when the managed Renderer setters are used.
+        void* (*Renderer_SetSharedMaterials_Orig)(void*, void*, void*) = nullptr;
+        void* (*Renderer_SetMaterials_Orig)(void*, void*, void*) = nullptr;
+        std::unordered_set<void*> g_loggedMaterialAssignments{};
+        std::unordered_set<void*> g_loggedMaterialRestorations{};
+
+        // Re-impose the mod material array the game just replaced.  Confirmed
+        // 2026-08-02: after a hot reapply the game calls set_sharedMaterials on
+        // the patched Geo_Body, which drops the private materials that carry the
+        // mod textures.  That is why the home screen showed the mod mesh with the
+        // original colours until a page switch re-ran the full asset path.
+        thread_local bool t_restoringMaterials = false;
+
+        bool MaterialArrayMatchesPatch(
+            void* materialsObject,
+            const ReversibleRendererPatch& patch) {
+            if (!materialsObject || patch.originalMaterials.empty()) return false;
+            const auto materials = reinterpret_cast<UnityArray<void*>*>(materialsObject);
+            if (!materials || materials->max_length != patch.originalMaterials.size()) {
+                return false;
+            }
+            for (size_t index = 0; index < patch.originalMaterials.size(); ++index) {
+                if (materials->At(static_cast<unsigned int>(index))
+                    != patch.originalMaterials[index]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        void RestorePatchedMaterials(
+            void* renderer,
+            void* assignedMaterials,
+            const char* setter,
+            void* (*restoreOriginal)(void*, void*, void*),
+            void* methodInfo = nullptr) {
+            if (!renderer || t_restoringMaterials || t_internalMaterialAssignment) return;
+
+            const auto rendererOverrides = CollectRendererTextureOverrides(renderer);
+            std::vector<ReversibleRendererPatch> patches;
+            {
+                std::lock_guard lock(g_reversiblePatchMutex);
+                patches = g_reversibleRendererPatches;
+            }
+
+            // The renderer passed to the Unity setter can be a scene instance,
+            // while the reversible registry was created from the cached prefab.
+            // Prefer pointer identity, then match the material array the game
+            // just submitted, and finally the still-installed patched mesh.
+            const ReversibleRendererPatch* matched = nullptr;
+            int bestScore = -1;
+            void* currentMesh = nullptr;
+            for (const auto& patch : patches) {
+                int score = -1;
+                if (patch.patchedRenderer == renderer) score = 300;
+                if (MaterialArrayMatchesPatch(assignedMaterials, patch)) {
+                    score = score > 200 ? score : 200;
+                }
+                if (patch.patchedMesh) {
+                    if (!currentMesh) currentMesh = GetSkinnedMeshRendererSharedMesh(renderer);
+                    if (currentMesh == patch.patchedMesh) {
+                        score = score > 100 ? score : 100;
+                    }
+                }
+                if (score > bestScore) {
+                    bestScore = score;
+                    matched = &patch;
+                }
+            }
+
+            std::vector<void*> patched;
+            if (matched) {
+                patched = !matched->patchedMaterials.empty()
+                    ? matched->patchedMaterials
+                    : matched->patchedMaterialKeys;
+            }
+
+            if (!rendererOverrides.empty()) {
+                bool firstReport = false;
+                {
+                    std::lock_guard lock(g_materialOverrideMutex);
+                    firstReport = g_loggedMaterialAssignments.emplace(renderer).second;
+                }
+                if (firstReport) {
+                    Log::InfoFmt(
+                        "[ModAsset] Materials reassigned on renderer with overrides: renderer=%p name=\"%s\" via=%s registryMatch=%d matchScore=%d slots=%zu patches=%zu",
+                        renderer,
+                        GetUnityObjectNameString(renderer).c_str(),
+                        setter,
+                        matched ? 1 : 0,
+                        bestScore,
+                        patched.size(),
+                        patches.size());
+                }
+            }
+            if (patched.empty()) return;
+
+            const auto materialClass = Il2cppUtils::GetClass(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "Material");
+            if (!materialClass) return;
+            auto restored = UnityArray<void*>::New(materialClass, patched.size());
+            if (!restored) return;
+            for (size_t index = 0; index < patched.size(); ++index) {
+                restored->At(static_cast<unsigned int>(index)) = patched[index];
+            }
+
+            t_restoringMaterials = true;
+            // Go through the same original setter that the game called.  The
+            // thread-local guard prevents this write from re-entering either
+            // assignment hook.
+            if (restoreOriginal) {
+                const auto method = Il2cppUtils::GetMethod(
+                    "UnityEngine.CoreModule.dll", "UnityEngine", "Renderer",
+                    setter, { "UnityEngine.Material[]" });
+                restoreOriginal(
+                    renderer,
+                    restored,
+                    methodInfo ? methodInfo : (method ? method->address : nullptr));
+            }
+            t_restoringMaterials = false;
+
+            {
+                std::lock_guard lock(g_materialOverrideMutex);
+                g_rendererTextureOverrideCache.erase(renderer);
+            }
+            bool firstReport = false;
+            {
+                std::lock_guard lock(g_materialOverrideMutex);
+                firstReport = g_loggedMaterialRestorations.emplace(renderer).second;
+            }
+            if (firstReport) {
+                Log::InfoFmt(
+                    "[ModAsset] Restored mod materials after the game reassigned them: renderer=%p name=\"%s\" via=%s slots=%zu matchScore=%d",
+                    renderer,
+                    GetUnityObjectNameString(renderer).c_str(),
+                    setter,
+                    patched.size(),
+                    bestScore);
+            }
+        }
+
+        void* Renderer_SetSharedMaterials_Hook(void* self, void* value, void* methodInfo) {
+            // Prime the per-renderer cache while the Mod material array is still
+            // installed; after the game's setter runs, the array contains the
+            // original materials and a fresh scan would lose the evidence.
+            (void)CollectRendererTextureOverrides(self);
+            const auto result = Renderer_SetSharedMaterials_Orig(self, value, methodInfo);
+            RestorePatchedMaterials(
+                self, value, "set_sharedMaterials", Renderer_SetSharedMaterials_Orig);
+            return result;
+        }
+
+        void* Renderer_SetMaterials_Hook(void* self, void* value, void* methodInfo) {
+            (void)CollectRendererTextureOverrides(self);
+            const auto result = Renderer_SetMaterials_Orig(self, value, methodInfo);
+            RestorePatchedMaterials(
+                self, value, "set_materials", Renderer_SetMaterials_Orig);
+            return result;
+        }
+
+        void Material_SetTexture_Hook(
+            void* self, const int propertyId, void* texture, void* methodInfo) {
+            bool overridden = false;
+            for (const auto& overrideEntry : GetRegisteredMaterialTextureOverrides(self)) {
+                if (overrideEntry.propertyId == propertyId) {
+                    texture = overrideEntry.texture;
+                    overridden = true;
+                    break;
+                }
+            }
+            // Diagnostic: the game writing textures onto a material we patched is
+            // the remaining candidate for "hot reapply looks wrong until a page
+            // switch".  Renderer.SetPropertyBlock was ruled out -- it never fires
+            // for these renderers.
+            if (overridden) {
+                bool firstReport = false;
+                {
+                    std::lock_guard lock(g_materialOverrideMutex);
+                    firstReport = g_loggedGameTextureWrites.emplace(self).second;
+                }
+                if (firstReport) {
+                    Log::InfoFmt("[ModAsset] Game set texture on a patched material: material=%p propertyId=%d",
+                        self,
+                        propertyId);
+                }
+            }
+            Material_SetTexture_Orig(self, propertyId, texture, methodInfo);
+        }
+
+        void Material_SetTextureString_Hook(
+            void* self, Il2cppString* propertyName, void* texture, void* methodInfo) {
+            const auto name = propertyName ? propertyName->ToString() : std::string{};
+            for (const auto& overrideEntry : GetRegisteredMaterialTextureOverrides(self)) {
+                if (overrideEntry.propertyName == name) {
+                    texture = overrideEntry.texture;
+                    break;
+                }
+            }
+            Material_SetTextureString_Orig(self, propertyName, texture, methodInfo);
+        }
+
         void* ResolveAssetBundleLoadAssetHookAddress() {
             if (const auto addr = Il2cppUtils::il2cpp_resolve_icall(
                 "UnityEngine.AssetBundle::LoadAsset_Internal(System.String,System.Type)")) {
@@ -3118,8 +4659,101 @@ namespace GakumasMod::Runtime {
             else {
                 Log::Warn("[ModAsset] CampusActorAnimationRig.RegisterBones unavailable; ActorSwing data graft disabled.");
             }
+            if (ResolvePersistentPropertyBlockMethods()) {
+                ok &= InstallHook("Renderer.SetPropertyBlock(renderer)",
+                    g_rendererSetPropertyBlockMethod->function,
+                    reinterpret_cast<void*>(Renderer_SetPropertyBlock_Hook),
+                    &Renderer_SetPropertyBlock_Orig);
+                ok &= InstallHook("Renderer.SetPropertyBlock(materialIndex)",
+                    g_rendererSetPropertyBlockMaterialIndexMethod->function,
+                    reinterpret_cast<void*>(Renderer_SetPropertyBlockMaterialIndex_Hook),
+                    &Renderer_SetPropertyBlockMaterialIndex_Orig);
+                ok &= InstallHook("Material.SetTexture(propertyId)",
+                    g_materialSetTextureMethod->function,
+                    reinterpret_cast<void*>(Material_SetTexture_Hook),
+                    &Material_SetTexture_Orig);
+                ok &= InstallHook("Material.SetTexture(propertyName)",
+                    g_materialSetTextureStringMethod->function,
+                    reinterpret_cast<void*>(Material_SetTextureString_Hook),
+                    &Material_SetTextureString_Orig);
+            }
+
+            // Reapply the complete Mod material array after the game writes its
+            // original array back to a renderer during a hot toggle.
+            if (const auto setShared = Il2cppUtils::GetMethod(
+                    "UnityEngine.CoreModule.dll", "UnityEngine", "Renderer",
+                    "set_sharedMaterials", { "UnityEngine.Material[]" })) {
+                InstallHook("Renderer.set_sharedMaterials",
+                    setShared->function,
+                    reinterpret_cast<void*>(Renderer_SetSharedMaterials_Hook),
+                    &Renderer_SetSharedMaterials_Orig);
+            }
+            if (const auto setMaterials = Il2cppUtils::GetMethod(
+                    "UnityEngine.CoreModule.dll", "UnityEngine", "Renderer",
+                    "set_materials", { "UnityEngine.Material[]" })) {
+                InstallHook("Renderer.set_materials",
+                    setMaterials->function,
+                    reinterpret_cast<void*>(Renderer_SetMaterials_Hook),
+                    &Renderer_SetMaterials_Orig);
+            }
+            else {
+                Log::Error("[ModAsset] Persistent material texture override methods unavailable.");
+                ok = false;
+            }
             return ok;
         }
+    }
+
+    GmrResult SetSessionModEnabled(const char* modIdUtf8, const uint8_t enabled) {
+        if (!modIdUtf8 || !*modIdUtf8) return GMR_E_INVALID_ARGUMENT;
+
+        const bool requestedEnabled = enabled != 0;
+        std::vector<LocalModAssetReplacementPtr> matchingReplacements;
+        bool stateChanged = false;
+        std::size_t activeForMod = 0;
+        std::size_t activeTotal = 0;
+        std::unique_lock replacementLock(g_replacementMutex);
+        bool found = false;
+        for (const auto& replacement : g_registeredReplacements) {
+            if (!replacement || replacement->modId != modIdUtf8) continue;
+            stateChanged |= replacement->sessionEnabled != requestedEnabled;
+            replacement->sessionEnabled = requestedEnabled;
+            matchingReplacements.push_back(replacement);
+            found = true;
+        }
+        if (!found) return GMR_E_MOD_NOT_FOUND;
+
+        RebuildActiveReplacementMapLocked(true);
+        for (const auto& [key, replacement] : g_replacementMap) {
+            (void)key;
+            if (replacement && replacement->modId == modIdUtf8) ++activeForMod;
+        }
+        activeTotal = g_replacementMap.size();
+        replacementLock.unlock();
+
+        size_t affectedInstances = 0;
+        if (stateChanged && requestedEnabled) {
+            std::unordered_set<std::string> reappliedSources;
+            for (const auto& replacement : matchingReplacements) {
+                if (!replacement) continue;
+                const auto sourceKey = NormalizeAssetName(replacement->sourceName);
+                if (!reappliedSources.emplace(sourceKey).second) continue;
+                affectedInstances += ReapplyLiveModInstances(*replacement);
+            }
+        }
+        else if (stateChanged) {
+            affectedInstances = RestoreLiveModInstances(modIdUtf8);
+        }
+
+        Log::InfoFmt(
+            "[ModAsset] Session toggle applied: modId=%s enabled=%d changed=%d activeRules=%zu activeTotal=%zu hotInstances=%zu.",
+            modIdUtf8,
+            requestedEnabled ? 1 : 0,
+            stateChanged ? 1 : 0,
+            activeForMod,
+            activeTotal,
+            affectedInstances);
+        return GMR_OK;
     }
 
     bool Initialize() {
@@ -3153,9 +4787,17 @@ namespace GakumasMod::Runtime {
         LoadLocalModManifests();
         Catalog::Refresh();
         Catalog::SetReady(true);
-        Log::InfoFmt("[ModAsset] Standalone mod plugin initialized. hooksOk=%d replacements=%zu",
+        std::size_t activeReplacementCount = 0;
+        std::size_t candidateReplacementCount = 0;
+        {
+            std::shared_lock replacementLock(g_replacementMutex);
+            activeReplacementCount = g_replacementMap.size();
+            candidateReplacementCount = g_registeredReplacements.size();
+        }
+        Log::InfoFmt("[ModAsset] Standalone mod plugin initialized. hooksOk=%d candidates=%zu active=%zu",
             hooksOk ? 1 : 0,
-            g_replacementMap.size());
+            candidateReplacementCount,
+            activeReplacementCount);
         return hooksOk;
     }
 
@@ -3166,6 +4808,55 @@ namespace GakumasMod::Runtime {
             MH_DisableHook(target);
         }
         g_hookTargets.clear();
+        {
+            std::unique_lock replacementLock(g_replacementMutex);
+            g_replacementMap.clear();
+            g_registeredReplacements.clear();
+        }
+        if (g_propertyBlockScratchHandle) {
+            UnityResolve::Invoke<void>(
+                "il2cpp_gchandle_free", std::exchange(g_propertyBlockScratchHandle, nullptr));
+        }
+        {
+            std::lock_guard lock(g_propertyBlockScratchMutex);
+            g_runtimeOwnedPropertyBlockSlots.clear();
+        }
+        {
+            std::lock_guard lock(g_propertyBlockSnapshotMutex);
+            for (auto& [renderer, snapshots] : g_rendererPropertyBlockSnapshots) {
+                (void)renderer;
+                for (auto& [materialIndex, snapshot] : snapshots) {
+                    (void)materialIndex;
+                    if (snapshot.handle) {
+                        UnityResolve::Invoke<void>("il2cpp_gchandle_free", snapshot.handle);
+                    }
+                }
+            }
+            g_rendererPropertyBlockSnapshots.clear();
+        }
+        for (const auto handle : g_runtimeMaterialHandles) {
+            if (handle) UnityResolve::Invoke<void>("il2cpp_gchandle_free", handle);
+        }
+        g_runtimeMaterialHandles.clear();
+        {
+            std::lock_guard lock(g_materialOverrideMutex);
+            g_materialTextureOverrides.clear();
+            g_rendererTextureOverrideCache.clear();
+            g_privateMaterials.clear();
+            g_loggedPersistentRenderers.clear();
+            g_loggedMaterialAssignments.clear();
+            g_loggedMaterialRestorations.clear();
+        }
+        {
+            std::lock_guard lock(g_reversiblePatchMutex);
+            g_reversibleRendererPatches.clear();
+            g_reapplyRootsByMod.clear();
+            g_loadedSourceGameObjects.clear();
+        }
+        {
+            std::lock_guard lock(g_animationRigMutex);
+            g_activeAnimationRigs.clear();
+        }
         Log::Info("[ModAsset] Standalone mod plugin shutdown.");
     }
 }

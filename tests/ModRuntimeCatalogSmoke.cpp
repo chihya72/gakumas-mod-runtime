@@ -21,6 +21,12 @@ namespace GakumasMod::Log {
     std::string Format(const char*, ...) { return {}; }
 }
 
+namespace GakumasMod::Runtime {
+    GmrResult SetSessionModEnabled(const char*, uint8_t) {
+        return GMR_OK;
+    }
+}
+
 namespace {
     using json = nlohmann::json;
 
@@ -138,8 +144,12 @@ int main() {
 
     const auto initial = ReadSnapshot();
     assert(initial.at("mods").size() == 5);
-    assert(FindMod(initial, "body-enabled").at("runtimeState") == "active");
-    assert(FindMod(initial, "body-conflict").at("runtimeState") == "conflict_lost");
+    assert(FindMod(initial, "body-enabled").at("configuredEnabled") == false);
+    assert(FindMod(initial, "body-enabled").at("runtimeState") == "conflict_auto_disabled");
+    assert(FindMod(initial, "body-enabled").at("conflict").at("withModId") == "body-conflict");
+    assert(FindMod(initial, "body-conflict").at("configuredEnabled") == false);
+    assert(FindMod(initial, "body-conflict").at("runtimeState") == "conflict_auto_disabled");
+    assert(FindMod(initial, "body-conflict").at("conflict").at("withModId") == "body-enabled");
     assert(FindMod(initial, "hair-disabled").at("configuredEnabled") == false);
     assert(FindMod(initial, "hair-disabled").at("runtimeState") == "disabled");
     assert(FindMod(initial, "multi-target").at("manifestState") == "multiple_targets");
@@ -148,7 +158,35 @@ int main() {
     assert(GakumasMod::Runtime::Catalog::SetModEnabled("hair-disabled", 1) == GMR_OK);
     const auto afterEnable = ReadSnapshot();
     assert(FindMod(afterEnable, "hair-disabled").at("configuredEnabled") == true);
-    assert(FindMod(afterEnable, "hair-disabled").at("restartRequired") == true);
+    assert(FindMod(afterEnable, "hair-disabled").at("registeredThisSession") == true);
+    assert(FindMod(afterEnable, "hair-disabled").at("runtimeState") == "active");
+    assert(FindMod(afterEnable, "hair-disabled").at("restartRequired") == false);
+
+    assert(GakumasMod::Runtime::Catalog::SetModEnabled("body-enabled", 1) == GMR_OK);
+    const auto afterFirstEnable = ReadSnapshot();
+    assert(FindMod(afterFirstEnable, "body-enabled").at("runtimeState") == "active");
+    assert(FindMod(afterFirstEnable, "body-conflict").at("runtimeState") == "disabled");
+    assert(FindMod(afterFirstEnable, "body-conflict").at("conflict").is_null());
+
+    assert(GakumasMod::Runtime::Catalog::SetModEnabled("body-conflict", 1)
+           == GMR_E_TARGET_CONFLICT);
+    const auto afterRejectedEnable = ReadSnapshot();
+    assert(FindMod(afterRejectedEnable, "body-enabled").at("runtimeState") == "active");
+    assert(FindMod(afterRejectedEnable, "body-enabled").at("configuredEnabled") == true);
+    assert(FindMod(afterRejectedEnable, "body-conflict").at("configuredEnabled") == false);
+    assert(FindMod(afterRejectedEnable, "body-conflict").at("runtimeState") == "conflict_enable_blocked");
+    assert(FindMod(afterRejectedEnable, "body-conflict").at("conflict").at("withModId") == "body-enabled");
+
+    assert(GakumasMod::Runtime::Catalog::SetModEnabled("body-enabled", 0) == GMR_OK);
+    const auto afterWinnerDisable = ReadSnapshot();
+    assert(FindMod(afterWinnerDisable, "body-enabled").at("runtimeState") == "disabled");
+    assert(FindMod(afterWinnerDisable, "body-conflict").at("runtimeState") == "disabled");
+    assert(FindMod(afterWinnerDisable, "body-conflict").at("conflict").is_null());
+
+    assert(GakumasMod::Runtime::Catalog::SetModEnabled("body-conflict", 1) == GMR_OK);
+    const auto afterSecondEnable = ReadSnapshot();
+    assert(FindMod(afterSecondEnable, "body-conflict").at("runtimeState") == "active");
+    assert(FindMod(afterSecondEnable, "body-enabled").at("runtimeState") == "disabled");
 
     std::filesystem::current_path(previous);
     std::filesystem::remove_all(root, ec);
