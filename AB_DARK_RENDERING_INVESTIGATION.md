@@ -174,7 +174,7 @@ mdl_chr_atbm-cstm-0140_body
 实际安装位置：
 
 ```text
-D:\Games\gakumas\gakumas-local\local-files\mods\chisaki-swimsuit
+<游戏目录>\gakumas-local\local-files\mods\chisaki-swimsuit
 ```
 
 该包包含两个材质槽，共六张语义贴图：
@@ -224,7 +224,7 @@ alpha 是干净的二值遮罩。可视化后，白色区域正确覆盖身体�
 检查的日志：
 
 ```text
-D:\Games\gakumas\gakumas-local\mod-plugin.log
+<游戏目录>\gakumas-local\mod-plugin.log
 ```
 
 并核对了游戏目录 DLL 和第一版构建 DLL 的哈希。
@@ -349,7 +349,7 @@ XInput 导出：8 个
 新 DLL：
 
 ```text
-D:\GIT\gakumas-modding\gakumas-mod-runtime\build\bin\x64\Release\xinput1_3.dll
+<仓库>\build\bin\x64\Release\xinput1_3.dll
 ```
 
 属性：
@@ -401,7 +401,7 @@ AB_DARK_RENDERING_INVESTIGATION.md
 按照允许的范围，在 workspace 同级创建了：
 
 ```text
-D:\GIT\gakumas-ab-dark-research
+<仓库同级>\gakumas-ab-dark-research
 ```
 
 其中保存了：

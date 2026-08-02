@@ -1,4 +1,4 @@
-"""Full method signatures from an Il2CppInspector address-map export.
+r"""Full method signatures from an Il2CppInspector address-map export.
 
 metadata_index.py reads global-metadata.dat and can only give names: parameter
 and return *types* live in the binary, not the metadata file.  That gap is what
@@ -12,23 +12,43 @@ so this answers "what does this actually take and return" offline.
     python inspector_index.py -c ErrorSheet             # match on class name only
     python inspector_index.py --raw MenuButtonViewBase  # also print the C signature
 
-Source is the iOS export; it is a different build from the DMM PC client, so
-treat *addresses* as meaningless here and signatures as strongly indicative but
-still worth confirming against metadata_index.py, which reads the PC metadata.
-Override the export path with GKMS_INSPECTOR.
+Source is an Il2CppInspector export of an iOS build; it is a different build
+from the DMM PC client, so treat *addresses* as meaningless here and signatures
+as strongly indicative but still worth confirming against metadata_index.py,
+which reads the PC metadata.
+
+Point GKMS_INSPECTOR at that export's il2cpp.json, e.g.
+
+    $env:GKMS_INSPECTOR = "<export>\il2cpp.json"
+
+The matching dump.cs sits beside it and is read by hand, not by this tool: it
+carries inheritance chains, SerializeField markers and enum values that neither
+index exposes.
 """
 import json
 import os
 import re
 import sys
 
-PATH = os.environ.get(
-    "GKMS_INSPECTOR",
-    r"D:/GIT/gkms-localify-ios/workspace/3.2.0/inspector/il2cpp.json")
+ENV = "GKMS_INSPECTOR"
+PATH = os.environ.get(ENV)
+
+
+def resolve_input(path=None):
+    """The input lives outside the repo, so it is named by GKMS_INSPECTOR, never hardcoded."""
+    target = path or PATH
+    if not target:
+        raise SystemExit(
+            f"{ENV} is not set. Point it at an Il2CppInspector export's "
+            f"il2cpp.json, for example:\n"
+            f'    $env:{ENV} = "<export-dir>\\il2cpp.json"')
+    if not os.path.exists(target):
+        raise SystemExit(f"{ENV} points at a missing file: {target}")
+    return target
 
 
 def load(path=None):
-    with open(path or PATH, "rb") as handle:
+    with open(resolve_input(path), "rb") as handle:
         return json.load(handle)["addressMap"]["methodDefinitions"]
 
 

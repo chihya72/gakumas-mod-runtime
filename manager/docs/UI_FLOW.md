@@ -41,7 +41,7 @@
 当前游戏目录中的管理器：
 
 ```text
-D:\Games\gakumas\xinput9_1_0.dll
+<游戏目录>\xinput9_1_0.dll
 大小：270848 字节
 SHA-256：DBAE909DEA768F74C13D51944649554E75F28B6AD517EFF0A9E4912A350766DC
 状态：已部署，最新入口缓存修复待实机复验
@@ -50,7 +50,7 @@ SHA-256：DBAE909DEA768F74C13D51944649554E75F28B6AD517EFF0A9E4912A350766DC
 当前游戏目录中的 Runtime：
 
 ```text
-D:\Games\gakumas\xinput1_3.dll
+<游戏目录>\xinput1_3.dll
 大小：571904 字节
 SHA-256：D262698D56293E624AF3613EB00F9ECD010C2893DD3F77B1FA0E2D6C9D7D1CE4
 状态：已部署；底层材质钩子启动旁路、原生两参数 ABI 和已登记 Renderer 筛选待实机复验
@@ -59,7 +59,7 @@ SHA-256：D262698D56293E624AF3613EB00F9ECD010C2893DD3F77B1FA0E2D6C9D7D1CE4
 联合替换前的备份：
 
 ```text
-D:\Games\gakumas\codex-backups\20260801-212145-menu-entry-mpb-refresh
+<游戏目录>\codex-backups\20260801-212145-menu-entry-mpb-refresh
 ```
 
 历史可复现基线：

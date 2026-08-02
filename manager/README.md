@@ -164,13 +164,13 @@ build\bin\x64\Release\xinput1_3.dll
 部署到：
 
 ```text
-D:\Games\gakumas\xinput1_3.dll
+<游戏目录>\xinput1_3.dll
 ```
 
 游戏必须由用户手动启动。管理器日志位于：
 
 ```text
-D:\Games\gakumas\gakumas-mod\mod-manager.log
+<游戏目录>\gakumas-mod\mod-manager.log
 ```
 
 日志等级由 `gakumas-mod/config.json` 的 `logLevel` 控制，与 Runtime 共用，默认

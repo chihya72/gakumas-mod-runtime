@@ -19,10 +19,11 @@
 
 ## 2. 当前 PC metadata
 
-输入：
+输入：游戏安装目录下的 `gakumas_Data\il2cpp_data\Metadata\global-metadata.dat`。
+路径不写死在仓库里，用环境变量指过去：
 
-```text
-D:\Games\gakumas\gakumas_Data\il2cpp_data\Metadata\global-metadata.dat
+```powershell
+$env:GKMS_METADATA = "<游戏目录>\gakumas_Data\il2cpp_data\Metadata\global-metadata.dat"
 ```
 
 仓库工具：
@@ -43,11 +44,11 @@ python tools\metadata_index.py --selfcheck
 
 ## 3. Il2CppInspector 导出和 `dump.cs`
 
-当前调查机资料：
+输入：一份 iOS 版的 Il2CppInspector 导出，目录里含 `il2cpp.json` 和 `dump.cs` 两个
+文件。它是外部产物，不在本仓库内，路径不写死，用环境变量指过去：
 
-```text
-D:\GIT\gkms-localify-ios\workspace\3.2.0\inspector\il2cpp.json
-D:\GIT\gkms-localify-ios\workspace\3.2.0\inspector\dump.cs
+```powershell
+$env:GKMS_INSPECTOR = "<导出目录>\il2cpp.json"
 ```
 
 仓库工具：
@@ -55,6 +56,8 @@ D:\GIT\gkms-localify-ios\workspace\3.2.0\inspector\dump.cs
 ```powershell
 python tools\inspector_index.py -c CampusButtonBase --raw
 ```
+
+`dump.cs` 不经工具，直接手翻——它就在 `il2cpp.json` 旁边。
 
 `dump.cs` 提供字段类型、继承关系、方法参数和偏移线索。它帮助确认：
 
@@ -84,7 +87,7 @@ UnityEngine.UI.ScrollRect.get_content         设置页滚动内容
 日志：
 
 ```text
-D:\Games\gakumas\gakumas-mod\mod-manager.log
+<游戏目录>\gakumas-mod\mod-manager.log
 ```
 
 当前 A 级 UI 证据：

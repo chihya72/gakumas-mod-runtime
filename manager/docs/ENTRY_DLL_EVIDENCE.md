@@ -5,7 +5,7 @@
 检查目标文件：
 
 ```text
-D:\Games\gakumas\d3d11.dll
+<游戏目录>\d3d11.dll
 ```
 
 该模块的 PE 导入表明确包含：
@@ -55,7 +55,7 @@ XInputSetState
 `xinput9_1_0.dll` 入口，已取得实机截图与日志。当前游戏目录部署版为：
 
 ```text
-D:\Games\gakumas\xinput9_1_0.dll
+<游戏目录>\xinput9_1_0.dll
 大小：270848 字节
 SHA-256：DBAE909DEA768F74C13D51944649554E75F28B6AD517EFF0A9E4912A350766DC
 ```
@@ -67,6 +67,6 @@ SHA-256：DBAE909DEA768F74C13D51944649554E75F28B6AD517EFF0A9E4912A350766DC
 ## 重新验证
 
 ```powershell
-dumpbin /imports D:\Games\gakumas\d3d11.dll
+dumpbin /imports <游戏目录>\d3d11.dll
 dumpbin /exports build\bin\x64\Release\xinput9_1_0.dll
 ```

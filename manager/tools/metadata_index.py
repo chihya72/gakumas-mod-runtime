@@ -1,4 +1,4 @@
-"""Type/method/field index straight out of il2cpp global-metadata.dat.
+r"""Type/method/field index straight out of il2cpp global-metadata.dat.
 
 Il2CppDumper needs GameAssembly.dll only to resolve addresses; every name and
 every class->member relation already lives in the metadata file.  On this game
@@ -12,16 +12,17 @@ not silently produce garbage -- run --selfcheck after a game update.
     python metadata_index.py -m SetCustomText        # which type owns a member
     python metadata_index.py --selfcheck             # verify the probe still works
 
-Override the .dat path with GKMS_METADATA.
+Point GKMS_METADATA at the game's global-metadata.dat, e.g.
+
+    $env:GKMS_METADATA = "<game>\gakumas_Data\il2cpp_data\Metadata\global-metadata.dat"
 """
 import os
 import string
 import struct
 import sys
 
-PATH = os.environ.get(
-    "GKMS_METADATA",
-    r"D:/Games/gakumas/gakumas_Data/il2cpp_data/Metadata/global-metadata.dat")
+ENV = "GKMS_METADATA"
+PATH = os.environ.get(ENV)
 
 TYPE_STRIDE = 88  # Il2CppTypeDefinition, metadata v29..v31
 FIELD_STRIDE = 12  # Il2CppFieldDefinition
@@ -116,8 +117,22 @@ def probe(data):
     return name_at, types, (methods[0], mstride), fields, params
 
 
+def resolve_input(path=None):
+    """The input lives outside the repo, so it is named by GKMS_METADATA, never hardcoded."""
+    target = path or PATH
+    if not target:
+        raise SystemExit(
+            f"{ENV} is not set. Point it at the game's global-metadata.dat, "
+            f"for example:\n"
+            f'    $env:{ENV} = "<game-dir>\\gakumas_Data\\il2cpp_data'
+            f'\\Metadata\\global-metadata.dat"')
+    if not os.path.exists(target):
+        raise SystemExit(f"{ENV} points at a missing file: {target}")
+    return target
+
+
 def load(path=None):
-    data = open(path or PATH, "rb").read()
+    data = open(resolve_input(path), "rb").read()
     name_at, (toff, tsize), ((moff, msize), mstride), (foff, fsize), (poff, psize) = probe(data)
 
     def members(start, count, base, size, stride):

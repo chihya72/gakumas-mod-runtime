@@ -728,7 +728,7 @@ Reload 时失效该 View 的注入缓存，待实机复验。
 管理器使用独立日志文件：
 
 ```text
-D:\Games\gakumas\gakumas-local\mod-manager.log
+<游戏目录>\gakumas-mod\mod-manager.log
 ```
 
 当前统一前缀为 `[GakumasModManager]`，同时输出到 `OutputDebugStringA`。进入正式模块化后可在
