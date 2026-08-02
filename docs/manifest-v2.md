@@ -6,7 +6,7 @@
 runtime 扫描：
 
 ```text
-gakumas-local/local-files/mods/<mod-id>/mod.json
+gakumas-mod/mods/<mod-id>/mod.json
 ```
 
 最小示例：

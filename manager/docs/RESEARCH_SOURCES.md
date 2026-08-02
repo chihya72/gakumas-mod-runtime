@@ -84,7 +84,7 @@ UnityEngine.UI.ScrollRect.get_content         设置页滚动内容
 日志：
 
 ```text
-D:\Games\gakumas\gakumas-local\mod-manager.log
+D:\Games\gakumas\gakumas-mod\mod-manager.log
 ```
 
 当前 A 级 UI 证据：

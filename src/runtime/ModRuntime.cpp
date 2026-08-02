@@ -2,6 +2,7 @@
 
 #include "ModIl2cppUtils.hpp"
 #include "ModLog.hpp"
+#include "ModPaths.hpp"
 #include "ModRuntimeCatalog.hpp"
 
 #include <Windows.h>
@@ -1451,7 +1452,7 @@ namespace GakumasMod::Runtime {
         }
 
         void LoadLocalModManifests() {
-            const auto modRoot = std::filesystem::path("./gakumas-local/local-files/mods");
+            const auto modRoot = Paths::Mods();
             std::unique_lock replacementLock(g_replacementMutex);
             g_replacementMap.clear();
             g_registeredReplacements.clear();
@@ -3223,7 +3224,7 @@ namespace GakumasMod::Runtime {
             }
 
             std::error_code ec;
-            const auto profileDir = std::filesystem::path("./gakumas-local/profiles");
+            const auto profileDir = Paths::Profiles();
             std::filesystem::create_directories(profileDir, ec);
             const auto outputPath = profileDir / (SanitizeFileName(sourceName) + ".profile.json");
             std::ofstream output(outputPath);

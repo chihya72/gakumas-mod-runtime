@@ -3,6 +3,8 @@
 #include "gkmm/ManagerEntry.hpp"
 #include "gkmm/ManagerLog.hpp"
 
+#include "ModPaths.hpp"
+
 #include <Windows.h>
 
 #include <atomic>
@@ -18,13 +20,14 @@ namespace {
     std::mutex g_logMutex;
 
     std::filesystem::path LogPath() {
+        namespace Paths = GakumasMod::Paths;
         wchar_t modulePath[MAX_PATH]{};
         const auto length = GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
         if (length > 0 && length < MAX_PATH) {
             return std::filesystem::path(modulePath, modulePath + length).parent_path()
-                / L"gakumas-local" / L"mod-manager.log";
+                / Paths::kRootName / Paths::kManagerLogName;
         }
-        return std::filesystem::path(L"gakumas-local") / L"mod-manager.log";
+        return std::filesystem::path(Paths::kRootName) / Paths::kManagerLogName;
     }
 
     std::string ProcessName() {

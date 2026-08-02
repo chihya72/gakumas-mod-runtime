@@ -7,7 +7,7 @@
 
 ## 当前能力
 
-- 扫描 `gakumas-local/local-files/mods/<mod-id>/mod.json`；
+- 扫描 `gakumas-mod/mods/<mod-id>/mod.json`；
 - 支持 manifest v2 的 `priority`、`part`、`renderers` 和贴图规则；
 - 支持 `body=Geo_Body`；
 - 支持 `hair=Geo_Hair` 或 `Geo_Hair+Geo_HairProp`；
@@ -21,7 +21,7 @@
 - 按 renderer、材质槽和 shader property 替换贴图；
 - 为贴图覆盖创建私有材质；保留 `set_sharedMaterials` / `set_materials` 诊断与恢复路径，
   同时保留当前 `MaterialPropertyBlock` 参数；
-- 写入 `gakumas-local/mod-plugin.log`；
+- 写入 `gakumas-mod/mod-plugin.log`；
 - 输出 source profile，并提供离线 Validator 与 Author Doctor。
 
 manifest 格式见 [docs/manifest-v2.md](docs/manifest-v2.md)，当前限制和后续任务见
@@ -86,7 +86,7 @@ build/bin/x64/Release/xinput1_3.dll
 把 `xinput1_3.dll` 放入游戏目录。每个 Mod 放在：
 
 ```text
-gakumas-local/local-files/mods/<mod-id>/
+gakumas-mod/mods/<mod-id>/
   mod.json
   your-mod.bundle
 ```

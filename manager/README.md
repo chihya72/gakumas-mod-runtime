@@ -19,7 +19,7 @@ xinput1_3.dll 自动加载
   → Runtime 初始化完成后调用 GkmmInitialize
   → 读取 1451 字节 Runtime Mod 快照
   → Hook MenuPresenter.SetEvent / CampusButtonBase.OnClicked
-  → 在主页菜单克隆“Mod 管理”入口
+  → 在主页菜单克隆“MOD 管理”入口
   → 点击入口进入游戏原生 SettingWindow 返回栈
   → 页面重构为“Mod 管理”及“服装 / 发型”分页
   → 原生 SwitchButton 显示 Mod、写回状态并热更新当前会话
@@ -68,13 +68,13 @@ SHA-256：221760876D257C45B37B22C10390BF9DCD6E197050E4D7BA0F4F3CBDD4377864
 - 固定行优先克隆游戏已加载的官方服装缩略图组件；组件尚未进入当前资源上下文时使用游戏字体的“服 / 发”占位，避免退回纯文字布局。
 - 后续截图已确认固定行、服装 Master 名称和官方服装缩略图可见；同时确认开关写入成功后视觉状态会被原生组件二次反转，发型的完整资源名未能按逻辑 ID 命中 `CostumeHead`。
 - 当前源码在 `EventSystem.Update()` 原始输入处理结束后统一校正开关视觉状态，并归一化发型逻辑 ID、`mdl_chr_` 前缀、资源路径和 `_hair` 后缀；后续实机日志和截图已确认开关连续校正、发型名称“月村手毬 · 公主皇冠”命中。
-- 发型预览不再依赖关联 Costume；当前构建调用 `CostumeHead.GetThumbAssetName()`，再由游戏的 `ThumbnailViewBase.Set(assetName)` 加载官方发型预览图。
+- 发型预览走和服装同一条 `CostumeThumbnailView.Set(ICostume)`：master `CostumeHead` 实现 `ICostume`。早先只调基类 `ThumbnailViewBase.Set(assetName)` 的写法会留下未初始化的空态标签并丢失长按详情，已删除。
 - Runtime 启动时注册全部有效替换候选但仍保持 AssetBundle 懒加载；标准 `SkinnedMeshRenderer` 规则会保存替换前的 Mesh、材质和骨骼绑定。关闭和重新开启的热切换主链已经实机生效。IDA MCP 后为即时颜色加入的底层材质数组钩子和崩溃排查扫描已全部撤回，当前恢复为“不崩溃、热切换生效、直接回主页颜色可能错误、切页恢复”的调查前基线。整对象替换和附加式规则仍按重新加载资源降级。
 - 导航现在按页面身份幂等处理：Mod 页再次点“Mod 管理”只关闭菜单层；系统设置页点“Mod 管理”原位重构；Mod 页点系统设置则调用游戏的 `ICampusScreen.Reload()` 原位恢复干净设置页，避免多个 `SettingTopScreen` 交叉压栈。Reload 同时失效当前 `MenuView` 的注入缓存，使同地址菜单重新创建“Mod 管理”入口。
 
 当前已部署、待实机验证的合并构建（2026-08-03，Runtime + 管理器同一个 DLL）：
-`669696` 字节，SHA-256
-`E51CB88683A767D51C3624A78D5DB2BC416621E35CB634548ABA790C6C0F2059`。
+`670720` 字节，SHA-256
+`464F4BC96382B048E2726A84D8F7865D57F545E6EE94DDC5AB96B5ED439028B9`。
 
 > 上面的历史基线是**证据记录**，对应当时的截图和日志，不要改；只有这一行"当前"需要
 > 随重编译更新。核对用 `Get-FileHash <游戏目录>\xinput1_3.dll -Algorithm SHA256`。
@@ -170,7 +170,7 @@ D:\Games\gakumas\xinput1_3.dll
 游戏必须由用户手动启动。管理器日志位于：
 
 ```text
-D:\Games\gakumas\gakumas-local\mod-manager.log
+D:\Games\gakumas\gakumas-mod\mod-manager.log
 ```
 
 ## 下一步

@@ -1,6 +1,7 @@
 #include "ModRuntimeCatalog.hpp"
 
 #include "ModLog.hpp"
+#include "ModPaths.hpp"
 #include "ModRuntime.hpp"
 
 #include <Windows.h>
@@ -475,7 +476,7 @@ namespace GakumasMod::Runtime::Catalog {
     }
 
     void Refresh() {
-        const auto modRoot = std::filesystem::path("./gakumas-local/local-files/mods");
+        const auto modRoot = Paths::Mods();
         std::vector<std::filesystem::path> manifests;
         std::error_code ec;
         if (std::filesystem::exists(modRoot, ec) && !ec) {

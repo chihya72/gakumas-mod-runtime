@@ -1,4 +1,5 @@
 #include "ModLog.hpp"
+#include "ModPaths.hpp"
 
 #include <Windows.h>
 
@@ -10,7 +11,6 @@
 
 namespace GakumasMod::Log {
     namespace {
-        constexpr const char* kLogPath = "./gakumas-local/mod-plugin.log";
 
         std::string VFormat(const char* fmt, va_list args) {
             if (!fmt) return {};
@@ -33,8 +33,8 @@ namespace GakumasMod::Log {
             if (!initialized) {
                 initialized = true;
                 std::error_code ec;
-                std::filesystem::create_directories("./gakumas-local", ec);
-                stream.open(kLogPath, std::ios::app);
+                std::filesystem::create_directories(Paths::Root(), ec);
+                stream.open(Paths::RuntimeLog(), std::ios::app);
             }
             return stream;
         }
