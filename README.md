@@ -124,11 +124,29 @@ xinput9_1_0.dll   本项目，负责游戏内管理 UI
 
 ## 构建与实机日志
 
+### 前置：同级 `gakumas-mod-runtime` 必须已 checkout 并编译过
+
+本仓库不携带第三方源码，通过**相对路径**引用同级仓库，因此两个仓库必须并排放在同一父目录下：
+
+| 依赖 | 来自 | 用途 |
+|---|---|---|
+| `tools/premake5.exe` | `..\gakumas-mod-runtime\` | 生成本仓库的 sln（本仓库没有 `generate.bat`） |
+| `deps/minhook/include` + 已编译的 `minhook.lib` | 同上（`build\bin\x64\Release\`） | `premake5.lua` 的 `includedirs` / `libdirs` / `links` |
+| `src/deps/nlohmann/json.hpp` | 同上 | `src/RuntimeModSnapshot.cpp` 直接 `#include` |
+
+所以顺序是：先在 `gakumas-mod-runtime` 跑一次 `generate.bat` + Release 构建，再回本仓库。
+
+### 生成 sln 并编译
+
 Visual Studio 2022 / MSBuild Release x64：
 
 ```powershell
-msbuild build\gakumas_in_game_mod_manager.sln /m /t:xinput9_1_0_manager /p:Configuration=Release /p:Platform=x64
+..\gakumas-mod-runtime\tools\premake5.exe --file=premake5.lua vs2022
+msbuild build\gakumas_in_game_mod_manager.sln /m /p:Configuration=Release /p:Platform=x64
 ```
+
+只编管理器 DLL 加 `/t:xinput9_1_0_manager`；`mod_presentation_tests` 是不依赖游戏的
+离线测试，直接运行 `build\bin\x64\Release\mod_presentation_tests.exe` 即可。
 
 产物：
 
