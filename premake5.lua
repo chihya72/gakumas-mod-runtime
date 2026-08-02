@@ -103,8 +103,13 @@ workspace "gakumas_mod_runtime"
 			"./manager/src/ModPresentationModel.cpp",
 			"./manager/src/RuntimeModSnapshot.cpp",
 			"./manager/tests/ModPresentationModelTests.cpp",
+			-- Game-free by design, so the config outcomes stay testable offline.
+			"./src/runtime/ModConfig.hpp",
+			"./src/runtime/ModConfig.cpp",
 		}
 
 		includedirs {
 			"./manager/include",
+			"./src/deps",
+			"./src/runtime",
 		}

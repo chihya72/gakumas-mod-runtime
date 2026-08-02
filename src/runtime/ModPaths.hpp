@@ -17,6 +17,7 @@ namespace GakumasMod::Paths {
         return std::filesystem::path(".") / kRootName;
     }
 
+    inline std::filesystem::path Config() { return Root() / "config.json"; }
     inline std::filesystem::path Mods() { return Root() / "mods"; }
     inline std::filesystem::path Profiles() { return Root() / "profiles"; }
     inline std::filesystem::path RuntimeLog() { return Root() / "mod-plugin.log"; }

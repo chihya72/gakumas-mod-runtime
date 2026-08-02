@@ -1,6 +1,10 @@
 #include "gkmm/ModPresentationModel.hpp"
 #include "gkmm/RuntimeModSnapshot.hpp"
 
+#include "ModConfig.hpp"
+
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -196,14 +200,57 @@ namespace {
         CHECK(NormalizeHairAssetKey("  MDL_CHR_TTMR-HAIR-0002_HAIR  ")
               == "ttmr-hair-0002");
     }
+    // Every "no answer" path has to come back nullopt so the caller keeps the
+    // UI on: a broken config.json must not look like a deliberate opt-out.
+    void TestManagerUiConfig() {
+        const auto dir = std::filesystem::temp_directory_path() / "gkms-config-test";
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        const auto path = dir / "config.json";
+
+        const auto write = [&path](const char* text) {
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            out << text;
+        };
+        const auto read = [&path] {
+            return GakumasMod::Config::ReadManagerUiEnabled(path);
+        };
+
+        std::filesystem::remove(path, ec);
+        CHECK(!read().has_value());                       // absent
+
+        write("{ not json");
+        CHECK(!read().has_value());                       // unparseable
+
+        write("{}");
+        CHECK(!read().has_value());                       // key missing
+
+        write("{\"modManagerUi\": \"false\"}");
+        CHECK(!read().has_value());                       // wrong type, not false
+
+        write("{\"modManagerUi\": false}");
+        CHECK(read().has_value() && !*read());            // the only way to opt out
+
+        write("{\"modManagerUi\": true}");
+        CHECK(read().has_value() && *read());
+
+        std::filesystem::remove_all(dir, ec);
+    }
 }
 
 int main() {
-    TestInvalidEnvelope();
-    TestPresentationAndProbeRendering();
-    TestBadRecordDoesNotBlockOthers();
-    TestOrderingDoesNotChangeWithToggleState();
-    TestHairAssetKeyNormalization();
+    try {
+        TestInvalidEnvelope();
+        TestPresentationAndProbeRendering();
+        TestBadRecordDoesNotBlockOthers();
+        TestOrderingDoesNotChangeWithToggleState();
+        TestHairAssetKeyNormalization();
+        TestManagerUiConfig();
+    }
+    catch (const std::exception& failure) {
+        std::cout << "ModPresentationModelTests FAILED: " << failure.what() << "\n";
+        return 1;
+    }
     std::cout << "ModPresentationModelTests passed\n";
     return 0;
 }

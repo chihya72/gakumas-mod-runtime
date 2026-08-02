@@ -1,4 +1,6 @@
+#include "ModConfig.hpp"
 #include "ModLog.hpp"
+#include "ModPaths.hpp"
 #include "ModRuntime.hpp"
 #include "ModRuntimeCatalog.hpp"
 #include "gkmm/ManagerEntry.hpp"
@@ -40,7 +42,16 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
             // Same condition the manager used to poll GetModsJson for, now
             // checked once: hooks may have failed while the catalog is still
             // readable, and the UI is useful in that case too.
-            if (GakumasMod::Runtime::Catalog::IsReady()) GkmmInitialize();
+            if (!GakumasMod::Runtime::Catalog::IsReady()) return;
+
+            // Deleting the standalone manager DLL used to disable the UI and
+            // leave the mods working; one binary needs a switch for that.
+            const auto configured = GakumasMod::Config::ReadManagerUiEnabled(
+                GakumasMod::Paths::Config());
+            GakumasMod::Log::InfoFmt("[ModAsset] Manager UI enabled=%d (config.json: %s).",
+                configured.value_or(true) ? 1 : 0,
+                configured ? "modManagerUi" : "absent or unusable, defaulting on");
+            if (configured.value_or(true)) GkmmInitialize();
         }).detach();
     }
     else if (reason == DLL_PROCESS_DETACH) {

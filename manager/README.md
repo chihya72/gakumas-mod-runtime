@@ -73,8 +73,8 @@ SHA-256：221760876D257C45B37B22C10390BF9DCD6E197050E4D7BA0F4F3CBDD4377864
 - 导航现在按页面身份幂等处理：Mod 页再次点“Mod 管理”只关闭菜单层；系统设置页点“Mod 管理”原位重构；Mod 页点系统设置则调用游戏的 `ICampusScreen.Reload()` 原位恢复干净设置页，避免多个 `SettingTopScreen` 交叉压栈。Reload 同时失效当前 `MenuView` 的注入缓存，使同地址菜单重新创建“Mod 管理”入口。
 
 当前已部署、待实机验证的合并构建（2026-08-03，Runtime + 管理器同一个 DLL）：
-`670720` 字节，SHA-256
-`464F4BC96382B048E2726A84D8F7865D57F545E6EE94DDC5AB96B5ED439028B9`。
+`671232` 字节，SHA-256
+`E39E0126C879B30EAD5109EA1CA276501E9814F52CE7D7B765A9CBEE1CB6E164`。
 
 > 上面的历史基线是**证据记录**，对应当时的截图和日志，不要改；只有这一行"当前"需要
 > 随重编译更新。核对用 `Get-FileHash <游戏目录>\xinput1_3.dll -Algorithm SHA256`。

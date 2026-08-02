@@ -91,6 +91,16 @@ gakumas-mod/mods/<mod-id>/
   your-mod.bundle
 ```
 
+游戏内 Mod 管理界面默认开启。要关掉它（Mod 替换照常工作），在
+`gakumas-mod/config.json` 写：
+
+```json
+{ "modManagerUi": false }
+```
+
+只有这个明确的 `false` 会关闭界面；文件不存在、JSON 写错或键名打错都按开启处理，
+实际取值会写进 `gakumas-mod/mod-plugin.log`。
+
 ## 作者诊断
 
 ```bat
