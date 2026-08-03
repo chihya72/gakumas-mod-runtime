@@ -83,7 +83,11 @@ build/bin/x64/Release/xinput1_3.dll
 
 ## 安装
 
-把 `xinput1_3.dll` 放入游戏目录。每个 Mod 放在：
+从 [Releases](https://git.chinosk6.cn/chihya72/gakumas-mod-runtime/releases) 下载 zip，
+解压到游戏根目录（`gakumas.exe` 所在处）。也可以自己构建，见
+[`docs/release.md`](docs/release.md)。
+
+每个 Mod 放在：
 
 ```text
 gakumas-mod/mods/<mod-id>/

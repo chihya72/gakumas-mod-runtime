@@ -6,3 +6,6 @@ __pycache__/
 *.user
 *.userosscache
 *.sln.docstates
+
+/dist/
+/build/package/

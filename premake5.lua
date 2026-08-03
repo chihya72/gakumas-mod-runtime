@@ -60,6 +60,10 @@ workspace "gakumas_mod_runtime"
 
 	filter {}
 
+	-- Stamped into the DLL so a shipped build can name itself; the release
+	-- workflow sets it from the tag.  Local builds say "dev".
+	defines { 'GKMS_VERSION="' .. (os.getenv("GKMS_VERSION") or "dev") .. '"' }
+
 	dependencies.projects()
 
 	project "gakumas_mod_runtime"

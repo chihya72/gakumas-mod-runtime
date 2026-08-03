@@ -1,3 +1,7 @@
+#ifndef GKMS_VERSION
+#define GKMS_VERSION "dev"
+#endif
+
 #include "ModConfig.hpp"
 #include "ModLog.hpp"
 #include "ModPaths.hpp"
@@ -62,8 +66,9 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
                 case GakumasMod::Log::Level::Error: levelName = "error"; break;
             }
             GakumasMod::Log::BannerFmt(
-                "[ModAsset] gakumas-mod-runtime loaded. logLevel=%s (config.json: %s)."
+                "[ModAsset] gakumas-mod-runtime %s loaded. logLevel=%s (config.json: %s)."
                 " Raise it to \"info\" for a full trace.",
+                GKMS_VERSION,
                 levelName,
                 requested ? "set" : "absent, using the default");
 
