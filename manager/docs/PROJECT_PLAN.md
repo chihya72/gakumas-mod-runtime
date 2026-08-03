@@ -4,10 +4,11 @@
 > 当前状态与已废弃做法见 `UI_FLOW.md`；调查数据源见 `RESEARCH_SOURCES.md`
 > 建立日期：2026-08-01  
 > 目标平台：学园偶像大师 DMM Windows 版（Unity IL2CPP / x64）  
-> 项目仓库：`gakumas-in-game-mod-manager`  
-> 依赖运行库：相邻仓库 `..\gakumas-mod-runtime`
-> 入口方式：独立的 `xinput9_1_0.dll` 入口，不使用 `gkms-localify-dmm` 注入
-> 现有入口：`version.dll` 为独立汉化插件，`xinput1_3.dll` 为 Mod Runtime，二者均保持独立；本管理器已确认使用第三个入口名 `xinput9_1_0.dll`
+> 项目仓库：本仓库的 `manager/` 子目录（原独立仓库 `gakumas-in-game-mod-manager` 已并入）
+> 入口方式：**与 Runtime 同处 `xinput1_3.dll`**。规划期设计的独立 `xinput9_1_0.dll` 入口已在
+>   DLL 合并后取消，下文凡按三个入口名展开的架构、加载顺序和握手章节均属规划期记录；
+>   入口选型论证见 [`ENTRY_DLL_EVIDENCE.md`](ENTRY_DLL_EVIDENCE.md)（同为历史）
+> 现有入口：`version.dll` 为独立汉化插件，`xinput1_3.dll` 为 Mod Runtime + 本管理器 UI
 
 ## 1. 项目摘要
 
