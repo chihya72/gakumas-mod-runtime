@@ -93,8 +93,8 @@ GmrResult setModEnabled(const char* modIdUtf8, uint8_t enabled);
 > 当前部署版热 ON 后仍需切换一次页面颜色才正确。原因是游戏在重应用之后调用
 > `Renderer.set_sharedMaterials` 换掉了 Mod 私有材质；早期文档归因于
 > `MaterialPropertyBlock` 覆盖，该结论已被实机证伪。IDA 后的底层材质数组钩子因加载卡住
-> 和点击崩溃已撤回；当前恢复为调查前的热切换基线。
-> 见 [`../manager/docs/OPEN_DEFECTS.md`](../manager/docs/OPEN_DEFECTS.md)。
+> 和点击崩溃已撤回；当前恢复为调查前的热切换基线。真因与下一步见
+> [`roadmap.md`](roadmap.md)「唯一未解缺陷」。
 
 整对象替换和附加式规则不保证即时逆转。此类规则的配置状态仍会写回，但已实例化对象可能
 需要重新加载资源或场景。

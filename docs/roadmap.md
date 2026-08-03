@@ -40,8 +40,8 @@
 - `Object::Internal_InstantiateSingle`；
 - `Object::Internal_InstantiateSingleWithParent`。
 
-四条 Instantiate 热路径 Hook 曾在实验版出现，2026-07-30 已回退。原因和证据见
-[`../AB_DARK_RENDERING_INVESTIGATION.md`](../AB_DARK_RENDERING_INVESTIGATION.md)。
+四条 Instantiate 热路径 Hook 曾在实验版出现，2026-07-30 已回退。原因见
+[`lessons-learned.md`](lessons-learned.md)。
 
 ## 实机状态
 
@@ -52,14 +52,29 @@
 - 标准服装 Mod 热 OFF/ON 生效；
 - 热重应用日志记录 `targets=2, applied=2, refreshedRigs=1`。
 
-已知缺陷：热 ON 后直接返回主页颜色错误，切换游戏页面后恢复。当前部署已恢复为 IDA MCP
-调查前“不崩溃且热切换生效”的基线，暂不承诺即时颜色修复。
+### 唯一未解缺陷：热 ON 后直接回主页颜色错误
 
-> **已证伪：**曾记录的原因「Renderer 已有 `MaterialPropertyBlock` 的旧贴图覆盖克隆材质」
-> 是错的——实机确认游戏在这些场景从不调用 `Renderer.SetPropertyBlock`。
+现象：主页 → 菜单 → Mod 管理 → 开关 → **直接返回主页**，网格是 Mod 的、颜色是原版的；
+打开任意其它页面再回主页就正常。当前部署已恢复为 IDA MCP 调查前「不崩溃且热切换生效」
+的基线，暂不承诺即时颜色修复。
 
-2026-08-02 确认的真实写入者是游戏调用 `Renderer.set_sharedMaterials` 替换了我们的私有材质。
-排除过程与下一步见 [`../manager/docs/OPEN_DEFECTS.md`](../manager/docs/OPEN_DEFECTS.md)。
+**真因**：游戏在热重应用**之后**调用材质数组写回，把带 Mod 贴图的私有材质换掉。这是五轮
+排查里唯一被日志抓到的写入者。切页面之所以能恢复，是因为那条路重走了完整替换。
+
+IDA 已确认底层写入链（两条都汇到 `Renderer::SetMaterialArray_Injected`，它是
+`Renderer.set_sharedMaterials` 在 IL2CPP 里的实际写入路径）：
+
+```text
+VLActorFaceModel.UpdateSharedMaterials()          → sub_7ABADF0  → SetMaterialArray_Injected
+CampusActorModelParts.AddCombinedOpaqueSubMesh()  → sub_A380B70  → SetMaterialArray_Injected
+```
+
+**下一步**：围绕 `VLActorFaceModel.UpdateSharedMaterials` 验证热重应用的时序，在该写入完成
+之后补回 Mod 材质。继续只追 `SetPropertyBlock` 到不了这条路径——那条已被实机证伪。
+直接在底层 icall 上挂钩子的几种做法都试过并撤回了，原因见
+[`lessons-learned.md`](lessons-learned.md)。
+
+> 另有两个 UI 缺陷（底栏多一颗星形分隔、橙条按三栏比例）已于 2026-08-02 实机确认修复。
 
 部署版的大小与 SHA-256 不在文档里抄写——两处手抄的哈希曾经同时过期。release 的哈希在
 release notes 里，本机部署版用 `Get-FileHash` 自己算。

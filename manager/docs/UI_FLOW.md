@@ -42,9 +42,7 @@
 ## 2. 构建与部署基线
 
 游戏目录里现在只有**一个** DLL：`xinput1_3.dll`，Runtime 与管理器 UI 编在一起。
-合并前那套「管理器 `xinput9_1_0.dll` + Runtime `xinput1_3.dll` 双文件部署」已不存在，
-它们各自的历史哈希留在
-[`ENTRY_DLL_EVIDENCE.md`](ENTRY_DLL_EVIDENCE.md) 作为当时的证据记录。
+合并前那套「管理器 `xinput9_1_0.dll` + Runtime `xinput1_3.dll` 双文件部署」已不存在。
 
 当前部署版的大小与 SHA-256 只在 [`../README.md`](../README.md) 维护一份（那一行随重编译
 更新），本文不再抄写——此处抄过的两份哈希都过期过。核对用
@@ -175,8 +173,8 @@ Renderer 的原 Mesh、材质、骨骼、根骨和已有每材质 `MaterialPrope
 > 从未执行的路径。
 
 实机抓到的写入链会在热重应用之后重新赋值材质数组，把带 Mod 贴图的私有材质换掉。
-当前先保留“不崩溃且可热切换，必要时切页刷新”的行为；完整排除过程和下一步见
-[`OPEN_DEFECTS.md`](OPEN_DEFECTS.md)。
+当前先保留“不崩溃且可热切换，必要时切页刷新”的行为；真因与下一步见
+[`../../docs/roadmap.md`](../../docs/roadmap.md)「唯一未解缺陷」。
 
 ## 4. 三种幂等导航
 

@@ -89,7 +89,6 @@
 
 ---
 
-原始记录：热开关三缺陷的逐轮排查见
-[`../manager/docs/OPEN_DEFECTS.md`](../manager/docs/OPEN_DEFECTS.md)；暗色渲染误判的完整
-过程见 [`../AB_DARK_RENDERING_INVESTIGATION.md`](../AB_DARK_RENDERING_INVESTIGATION.md)；
-UI 流程与安全边界见 [`../manager/docs/UI_FLOW.md`](../manager/docs/UI_FLOW.md)。
+未解缺陷的真因与下一步见 [`roadmap.md`](roadmap.md)；UI 流程与安全边界见
+[`../manager/docs/UI_FLOW.md`](../manager/docs/UI_FLOW.md)。逐轮排查日志、暗色渲染误判的
+完整过程和独立入口 DLL 的证据已随本文合并删除，需要时从 git 历史取。

@@ -114,8 +114,6 @@ version.dll       汉化插件，独立，不参与本项目
 xinput1_3.dll     Runtime（Mod 扫描、替换、Runtime API）+ 本目录的游戏内管理 UI
 ```
 
-[`docs/ENTRY_DLL_EVIDENCE.md`](docs/ENTRY_DLL_EVIDENCE.md) 记录的是独立
-`xinput9_1_0.dll` 时期的入口选择和 XInput 转发证据，DLL 合并后仅作历史参考。
 
 ## 文档入口
 
@@ -123,9 +121,8 @@ xinput1_3.dll     Runtime（Mod 扫描、替换、Runtime API）+ 本目录的�
 - [`docs/UI_FLOW.md`](docs/UI_FLOW.md)：当前源码流程、最新实机证据、限制和接手步骤；
 - [`docs/SIGNATURE_MATRIX.md`](docs/SIGNATURE_MATRIX.md)：当前 PC 已验证/待验证的 IL2CPP 成员；
 - [`docs/RESEARCH_SOURCES.md`](docs/RESEARCH_SOURCES.md)：metadata、dump 和日志的证据等级；
-- [`docs/OPEN_DEFECTS.md`](docs/OPEN_DEFECTS.md)：缺陷排查记录；三个里两个已实机关闭，只剩热开关后颜色；
 - [`../docs/lessons-learned.md`](../docs/lessons-learned.md)：**反面教训汇总**（证伪的结论、撤回的实现、废弃的 UI 路线）；
-- [`docs/ENTRY_DLL_EVIDENCE.md`](docs/ENTRY_DLL_EVIDENCE.md)：独立 `xinput9_1_0.dll` 时期的加载依据（历史）。
+- [`../docs/roadmap.md`](../docs/roadmap.md)：唯一未解缺陷的真因与下一步。
 
 
 ## 构建与实机日志

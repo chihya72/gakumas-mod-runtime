@@ -46,8 +46,9 @@ manifest 格式见 [docs/manifest-v2.md](docs/manifest-v2.md)，当前限制和�
 
 2026-08-02 探针确认的真实写入者是：游戏在热重应用之后调用材质数组写回，换掉带 Mod
 贴图的私有材质。IDA 后加入的底层 `SetMaterialArray_Injected` 实验钩子及其后续受限扫描
-连续造成加载卡住或点击崩溃，现已从源码和部署版移除。完整的排除过程、证据和下一步见
-[`manager/docs/OPEN_DEFECTS.md`](manager/docs/OPEN_DEFECTS.md)。
+连续造成加载卡住或点击崩溃，现已从源码和部署版移除。真因、IDA 确认的写入链和下一步见
+[`docs/roadmap.md`](docs/roadmap.md)「唯一未解缺陷」，试过并撤回的做法见
+[`docs/lessons-learned.md`](docs/lessons-learned.md)。
 
 手抄的部署版大小与哈希在这里连续过期过两次，已经删掉：release 的哈希由
 `publish-release.ps1` 写进 release notes，本机部署版自己算：
@@ -126,5 +127,4 @@ python -m unittest discover -s tests -v
 
 当前 Release 构建已通过，Python `unittest discover` 的 4 项测试通过。完整验收还应核对
 `xinput1_3.def` 的 9 个导出（8 个 XInput 代理 + `GmrGetRuntimeApiV1`），并在目标游戏复验热 ON/OFF/ON 后无需切换页面即可得到正确
-Mesh、材质、骨骼和颜色。旧的 3DMigoto 暗色调查与本次热开关 MPB 提交缺陷是两个独立问题，
-见 [AB_DARK_RENDERING_INVESTIGATION.md](AB_DARK_RENDERING_INVESTIGATION.md)。
+Mesh、材质、骨骼和颜色。
