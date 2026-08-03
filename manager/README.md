@@ -124,6 +124,7 @@ xinput1_3.dll     Runtime（Mod 扫描、替换、Runtime API）+ 本目录的�
 - [`docs/SIGNATURE_MATRIX.md`](docs/SIGNATURE_MATRIX.md)：当前 PC 已验证/待验证的 IL2CPP 成员；
 - [`docs/RESEARCH_SOURCES.md`](docs/RESEARCH_SOURCES.md)：metadata、dump 和日志的证据等级；
 - [`docs/OPEN_DEFECTS.md`](docs/OPEN_DEFECTS.md)：缺陷排查记录；三个里两个已实机关闭，只剩热开关后颜色；
+- [`../docs/lessons-learned.md`](../docs/lessons-learned.md)：**反面教训汇总**（证伪的结论、撤回的实现、废弃的 UI 路线）；
 - [`docs/ENTRY_DLL_EVIDENCE.md`](docs/ENTRY_DLL_EVIDENCE.md)：独立 `xinput9_1_0.dll` 时期的加载依据（历史）。
 
 

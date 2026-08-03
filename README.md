@@ -25,7 +25,8 @@
 - 输出 source profile，并提供离线 Validator 与 Author Doctor。
 
 manifest 格式见 [docs/manifest-v2.md](docs/manifest-v2.md)，当前限制和后续任务见
-[docs/roadmap.md](docs/roadmap.md)。
+[docs/roadmap.md](docs/roadmap.md)，做错过什么见
+[docs/lessons-learned.md](docs/lessons-learned.md)。
 
 ## 当前验证状态
 
