@@ -126,8 +126,6 @@ xinput1_3.dll     Runtime（Mod 扫描、替换、Runtime API）+ 本目录的�
 - [`docs/OPEN_DEFECTS.md`](docs/OPEN_DEFECTS.md)：缺陷排查记录；三个里两个已实机关闭，只剩热开关后颜色；
 - [`docs/ENTRY_DLL_EVIDENCE.md`](docs/ENTRY_DLL_EVIDENCE.md)：独立 `xinput9_1_0.dll` 时期的加载依据（历史）。
 
-`BORROW_LIBRARY_CASE_STUDY.md` 只是早期 Campus UI/API 背景研究，不属于当前 Mod 管理器的
-产品范围或开发路线。
 
 ## 构建与实机日志
 

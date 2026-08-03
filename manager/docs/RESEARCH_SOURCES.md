@@ -164,8 +164,9 @@ IDA 进一步确认底层写入链：`VLActorFaceModel.UpdateSharedMaterials()`
 - 不导出、复制或重放账号 token；
 - 不把 Campus gRPC 当作 Runtime Mod JSON 的来源。
 
-早期借卡讨论保存在 `BORROW_LIBRARY_CASE_STUDY.md`，只作为历史案例。除非产品范围被用户
-明确修改，否则不得把其中任务加入当前开发计划或签名矩阵。
+借卡、好友、名片和 Campus 网络 API 不在产品范围内，相关早期调研已随文档整理删除
+（需要时从 git 历史取）。除非产品范围被用户明确修改，否则不得把这类任务加入开发计划
+或签名矩阵。
 
 ## 7. 调查原则
 

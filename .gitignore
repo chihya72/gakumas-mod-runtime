@@ -1,4 +1,5 @@
-/build/
+# 不加前导斜杠：manager/ 并进来时带着自己的 build/，它的 .gitignore 已删。
+build/
 /.vs/
 __pycache__/
 *.py[cod]
@@ -8,4 +9,3 @@ __pycache__/
 *.sln.docstates
 
 /dist/
-/build/package/
