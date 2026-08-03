@@ -1,7 +1,9 @@
 # Runtime API v1
 
-`gakumas-mod-runtime` 通过 `GmrGetRuntimeApiV1` 向独立游戏内管理器提供版本化 C ABI。
-API 负责完整 Mod 快照、当前会话启停和 Manifest 持久化；不负责管理器 UI 注入。
+`gakumas-mod-runtime` 通过 `GmrGetRuntimeApiV1` 提供版本化 C ABI。管理器 UI 现在与
+Runtime 同处 `xinput1_3.dll`，但仍只经由这张函数表与 Runtime 通信，不直接调用内部符号；
+导出同时保留给外部调用方。API 负责完整 Mod 快照、当前会话启停和 Manifest 持久化；
+不负责管理器 UI 注入。
 
 > 当前语义：标准 `SkinnedMeshRenderer` 替换支持热开关，不再要求每次切换后重启游戏。
 > 整对象替换、附加式规则或热恢复失败时仍可能需要重新选择资源、重进场景或重启。
@@ -20,8 +22,8 @@ GmrResult GMR_CALL GmrGetRuntimeApiV1(GmrRuntimeApiV1* output);
 - `setModEnabled`；
 - `writeLog`。
 
-当前 Release 产物和部署模块名都是 `xinput1_3.dll`。管理器只从已加载模块取得导出，
-不加载、覆盖或改名汉化插件的 `version.dll`。
+当前 Release 产物和部署模块名都是 `xinput1_3.dll`。不加载、覆盖或改名汉化插件的
+`version.dll`。
 
 ## 2. 所有权与线程约束
 
@@ -91,8 +93,8 @@ GmrResult setModEnabled(const char* modIdUtf8, uint8_t enabled);
 > 当前部署版热 ON 后仍需切换一次页面颜色才正确。原因是游戏在重应用之后调用
 > `Renderer.set_sharedMaterials` 换掉了 Mod 私有材质；早期文档归因于
 > `MaterialPropertyBlock` 覆盖，该结论已被实机证伪。IDA 后的底层材质数组钩子因加载卡住
-> 和点击崩溃已撤回；当前恢复为调查前的热切换基线。见管理器仓库
-> `docs/OPEN_DEFECTS.md`。
+> 和点击崩溃已撤回；当前恢复为调查前的热切换基线。
+> 见 [`../manager/docs/OPEN_DEFECTS.md`](../manager/docs/OPEN_DEFECTS.md)。
 
 整对象替换和附加式规则不保证即时逆转。此类规则的配置状态仍会写回，但已实例化对象可能
 需要重新加载资源或场景。
@@ -116,10 +118,11 @@ GmrResult setModEnabled(const char* modIdUtf8, uint8_t enabled);
 ## 6. 当前验证状态
 
 - Release x64 已构建并确认导出 `GmrGetRuntimeApiV1`；
-- `tests/ModRuntimeCatalogSmoke.cpp` 覆盖有效/无效目录、冲突、多目标、缺 Bundle、原子写回和
-  会话回滚语义；
-- Python `unittest discover` 当前 4 项通过；
+- `tests/ModRuntimeCatalogSmoke.cpp` 写了有效/无效目录、冲突、多目标、缺 Bundle、原子写回和
+  会话回滚语义，**但它还没有被 `premake5.lua` 的任何 project 引用，因此当前不编译也不运行**；
+- 编译并运行的离线测试只有 `mod_presentation_tests`（`package.ps1` 打包前会跑）与
+  Python `unittest discover` 的 4 项；
 - 目标游戏已确认快照、Manifest 写回和标准服装热 OFF/ON 生效；
-- 当前部署为 IDA MCP 调查前的 `570880` 字节 Runtime：标准热 OFF/ON 生效且此前实机不崩溃，
+- 当前部署为 IDA MCP 调查前的 Runtime：标准热 OFF/ON 生效且此前实机不崩溃，
   但直接返回主页的颜色仍依赖切换页面刷新；
-- Manager/Runtime 目前各自保存同一 API 头文件副本，整理为单一共享 SDK 仍是后续任务。
+- API 头文件 `src/runtime/ModRuntimeApi.h` 现在只有一份，Manager 直接包含它。

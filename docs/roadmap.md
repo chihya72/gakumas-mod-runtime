@@ -29,7 +29,6 @@
 - `UnityEngine.AssetBundleRequest::get_asset()`；
 - `UnityEngine.Renderer::set_sharedMaterials(Material[])`；
 - `UnityEngine.Renderer::set_materials(Material[])`；
-- `UnityEngine.Renderer::SetMaterialArray_Injected(Material[])`；
 - `UnityEngine.Renderer::SetPropertyBlock(MaterialPropertyBlock)`；
 - `UnityEngine.Renderer::SetPropertyBlock(MaterialPropertyBlock,int)`；
 - `UnityEngine.Material::SetTexture(int/string,Texture)`。
@@ -60,10 +59,10 @@
 > 是错的——实机确认游戏在这些场景从不调用 `Renderer.SetPropertyBlock`。
 
 2026-08-02 确认的真实写入者是游戏调用 `Renderer.set_sharedMaterials` 替换了我们的私有材质。
-排除过程与下一步见管理器仓库 `docs/OPEN_DEFECTS.md`。
+排除过程与下一步见 [`../manager/docs/OPEN_DEFECTS.md`](../manager/docs/OPEN_DEFECTS.md)。
 
-当前已构建并部署版的大小与 SHA-256 见 [`../README.md`](../README.md)「当前验证状态」；
-这里不再抄一份，两处哈希曾经同时过期。
+部署版的大小与 SHA-256 不在文档里抄写——两处手抄的哈希曾经同时过期。release 的哈希在
+release notes 里，本机部署版用 `Get-FileHash` 自己算。
 
 IDA 后实验性的 `SetMaterialArray_Injected` 钩子、按钮帧末队列和受限 Renderer 扫描均已
 撤回；ON/OFF 调用链恢复为调查前的同步热恢复/热重应用实现。管理器 UI 修复不在回退范围内。
@@ -82,8 +81,9 @@ IDA 后实验性的 `SetMaterialArray_Injected` 钩子、按钮帧末队列和�
 
 ## 发布前验收
 
-- Release x64 构建、8 个导出和当前 API 结构尺寸；
-- Python 测试、catalog smoke test 和源码契约测试；
+- Release x64 构建、9 个导出（8 个 XInput 代理 + `GmrGetRuntimeApiV1`）和当前 API 结构尺寸；
+- Python 测试、`mod_presentation_tests` 和源码契约测试（`tests/ModRuntimeCatalogSmoke.cpp`
+  尚未接进 premake，不在这条里）；
 - 正常退出、强制关闭、重启后的 Manifest 一致性；
 - 文件无权限、外部并发修改、缺 Bundle 和损坏 Manifest；
 - 服装/发型混合、同目标冲突和大量 Mod；
