@@ -130,6 +130,7 @@ namespace GakumasMod::Runtime {
         struct ReversibleRendererPatch {
             std::string modId;
             std::string sourceName;
+            std::string rendererName;
             void* patchedRenderer{};
             void* patchedMesh{};
             void* originalMesh{};
@@ -142,6 +143,16 @@ namespace GakumasMod::Runtime {
             std::vector<void*> originalMaterials{};
             std::vector<std::string> originalBoneNames{};
             std::string originalRootBoneName;
+        };
+
+        // Reapply identity deliberately contains no scene object pointers.  Scene
+        // GameObjects and renderers are destroyed/recreated during transitions, so
+        // keeping them here turns the next toggle into a native use-after-free.
+        struct ReapplyRendererIdentity {
+            std::string sourceName;
+            void* originalMesh{};
+            int sourceRootDepth{};
+            std::string rendererName;
         };
 
         struct ActiveAnimationRigContext {
@@ -301,8 +312,8 @@ namespace GakumasMod::Runtime {
         std::unordered_map<void*, std::unordered_map<int, RendererPropertyBlockSnapshot>>
             g_rendererPropertyBlockSnapshots{};
         std::vector<ReversibleRendererPatch> g_reversibleRendererPatches{};
-        std::unordered_map<std::string, std::vector<void*>> g_reapplyRootsByMod{};
-        std::unordered_map<std::string, std::vector<void*>> g_loadedSourceGameObjects{};
+        std::unordered_map<std::string, std::vector<ReapplyRendererIdentity>>
+            g_reapplyRendererIdentities{};
         std::vector<ActiveAnimationRigContext> g_activeAnimationRigs{};
         Il2CppGCHandle g_propertyBlockScratchHandle{};
         UnityResolve::Method* g_rendererSetPropertyBlockMethod{};
@@ -3259,33 +3270,6 @@ namespace GakumasMod::Runtime {
             return result;
         }
 
-        void RememberLoadedSourceGameObject(
-            const std::string& sourceName,
-            void* gameObject) {
-            if (!gameObject || std::strcmp(GetUnityObjectClassName(gameObject), "GameObject") != 0) {
-                return;
-            }
-            const auto key = NormalizeAssetName(sourceName);
-            bool isRegisteredSource = false;
-            {
-                std::shared_lock replacementLock(g_replacementMutex);
-                isRegisteredSource = std::any_of(
-                    g_registeredReplacements.begin(),
-                    g_registeredReplacements.end(),
-                    [&key](const auto& replacement) {
-                        return replacement
-                            && NormalizeAssetName(replacement->sourceName) == key;
-                    });
-            }
-            if (!isRegisteredSource) return;
-
-            std::lock_guard lock(g_reversiblePatchMutex);
-            auto& objects = g_loadedSourceGameObjects[key];
-            if (std::find(objects.begin(), objects.end(), gameObject) == objects.end()) {
-                objects.push_back(gameObject);
-            }
-        }
-
         void RegisterReversibleRendererPatch(
             const LocalModAssetReplacement& replacement,
             void* renderer,
@@ -3301,6 +3285,7 @@ namespace GakumasMod::Runtime {
             ReversibleRendererPatch patch{};
             patch.modId = replacement.modId;
             patch.sourceName = replacement.sourceName;
+            patch.rendererName = GetUnityObjectNameString(renderer);
             patch.patchedRenderer = renderer;
             patch.patchedMesh = patchedMesh;
             patch.originalMesh = originalMesh;
@@ -3451,39 +3436,84 @@ namespace GakumasMod::Runtime {
             }
             if (patches.empty()) return 0;
 
-            // Matching reads sharedMesh/sharedMaterials off a renderer list that
-            // was snapshotted before anything was touched.  Restoring writes
-            // bones, mesh, materials and toggles enabled on those same objects.
-            // Interleaving the two meant later iterations kept reading the stale
-            // snapshot through Unity after it had already been mutated, which
-            // crashed inside UnityPlayer.  Match everything first, then write.
-            std::unordered_set<void*> seenRenderers;
-            std::vector<std::pair<void*, const ReversibleRendererPatch*>> matches;
-            for (const auto& patch : patches) {
-                if (!patch.patchedRenderer || !IsNativeObjectAlive(patch.patchedRenderer)
-                    || !RendererMatchesPatch(patch.patchedRenderer, patch)) continue;
-                if (!seenRenderers.emplace(patch.patchedRenderer).second) continue;
-                matches.emplace_back(patch.patchedRenderer, &patch);
-            }
-            // Only sweep the scene for patches whose recorded renderer is gone or
-            // no longer carries the Mod mesh -- a re-instantiated actor.
-            if (matches.size() < patches.size()) {
-                const auto rendererClass = Il2cppUtils::GetClass(
-                    "UnityEngine.CoreModule.dll", "UnityEngine", "SkinnedMeshRenderer");
-                if (!rendererClass) return 0;
-                for (const auto renderer : rendererClass->FindObjectsByType<void*>()) {
-                    if (!renderer || !IsNativeObjectAlive(renderer)
-                        || !seenRenderers.emplace(renderer).second) continue;
-                    const auto patch = std::find_if(
-                        patches.begin(), patches.end(), [renderer](const auto& candidate) {
-                            return RendererMatchesPatch(renderer, candidate);
+            // Keep only asset-level identities for a later re-enable.  Never carry
+            // the scene renderer/GameObject pointers past this call: those objects
+            // can disappear as soon as the current view changes.
+            {
+                std::lock_guard lock(g_reversiblePatchMutex);
+                auto& identities = g_reapplyRendererIdentities[modId];
+                identities.clear();
+                for (const auto& patch : patches) {
+                    if (!patch.originalMesh) continue;
+                    const ReapplyRendererIdentity identity{
+                        patch.sourceName,
+                        patch.originalMesh,
+                        patch.sourceRootDepth,
+                        patch.rendererName,
+                    };
+                    const auto duplicate = std::find_if(
+                        identities.begin(),
+                        identities.end(),
+                        [&identity](const auto& existing) {
+                            return existing.sourceName == identity.sourceName
+                                && existing.originalMesh == identity.originalMesh
+                                && existing.sourceRootDepth == identity.sourceRootDepth
+                                && existing.rendererName == identity.rendererName;
                         });
-                    if (patch == patches.end()) continue;
-                    matches.emplace_back(renderer, &*patch);
+                    if (duplicate == identities.end()) identities.push_back(identity);
                 }
             }
 
-            std::unordered_set<void*> restoredSourceRoots;
+            // A cached renderer pointer can remain non-null (and can even pass
+            // Unity's IsNativeObjectAlive check) after the actor was destroyed or
+            // its native object address was reused.  Calling Renderer getters on
+            // that raw pointer is a native crash boundary.  Take one current
+            // SkinnedMeshRenderer snapshot first and only call Unity getters on
+            // objects returned by that snapshot.  The cached pointer is used only
+            // as a preference after membership in the current live set is proven.
+            const auto rendererClass = Il2cppUtils::GetClass(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "SkinnedMeshRenderer");
+            if (!rendererClass) return 0;
+            const auto liveRenderers = rendererClass->FindObjectsByType<void*>();
+            std::unordered_set<void*> liveRendererSet;
+            for (const auto renderer : liveRenderers) {
+                if (renderer && IsNativeObjectAlive(renderer)) liveRendererSet.emplace(renderer);
+            }
+
+            std::unordered_set<void*> seenRenderers;
+            std::vector<std::pair<void*, const ReversibleRendererPatch*>> matches;
+            const auto tryMatch = [&](void* renderer, const ReversibleRendererPatch& patch) {
+                if (!renderer || !liveRendererSet.contains(renderer)
+                    || seenRenderers.contains(renderer)
+                    || !RendererMatchesPatch(renderer, patch)) {
+                    return false;
+                }
+                seenRenderers.emplace(renderer);
+                matches.emplace_back(renderer, &patch);
+                return true;
+            };
+
+            // Prefer the original renderer when it is still part of the current
+            // scene snapshot; otherwise resolve the patch against current objects.
+            for (const auto& patch : patches) {
+                if (patch.patchedRenderer) tryMatch(patch.patchedRenderer, patch);
+            }
+            for (const auto& patch : patches) {
+                if (std::any_of(
+                        matches.begin(), matches.end(),
+                        [&patch](const auto& match) { return match.second == &patch; })) {
+                    continue;
+                }
+                for (const auto renderer : liveRenderers) {
+                    if (tryMatch(renderer, patch)) break;
+                }
+            }
+            if (matches.size() < patches.size()) {
+                Log::WarnFmt(
+                    "[ModAsset] Hot restore skipped unmatched renderer patches: mod=%s patches=%zu matched=%zu liveRenderers=%zu",
+                    modId.c_str(), patches.size(), matches.size(), liveRenderers.size());
+            }
+
             size_t restoredCount = 0;
             for (const auto& [renderer, patch] : matches) {
                 const auto restoredBones = BuildRestoredBoneArray(renderer, *patch);
@@ -3507,10 +3537,6 @@ namespace GakumasMod::Runtime {
                 ClearRuntimePropertyBlocks(renderer, patch->originalMaterials.size());
                 RefreshSkinnedMeshRendererState(renderer);
 
-                if (const auto sourceRoot = GetSourceRootGameObject(
-                        renderer, patch->sourceRootDepth)) {
-                    restoredSourceRoots.emplace(sourceRoot);
-                }
                 ++restoredCount;
                 Log::InfoFmt(
                     "[ModAsset] Hot-restored renderer: mod=%s source=%s renderer=%s mesh=%s",
@@ -3520,15 +3546,6 @@ namespace GakumasMod::Runtime {
                     GetUnityObjectNameString(patch->originalMesh).c_str());
             }
 
-            {
-                std::lock_guard lock(g_reversiblePatchMutex);
-                auto& targets = g_reapplyRootsByMod[modId];
-                for (const auto root : restoredSourceRoots) {
-                    if (std::find(targets.begin(), targets.end(), root) == targets.end()) {
-                        targets.push_back(root);
-                    }
-                }
-            }
             return restoredCount;
         }
 
@@ -3799,74 +3816,46 @@ namespace GakumasMod::Runtime {
 
         std::vector<void*> CollectLiveReapplyTargets(
             const LocalModAssetReplacement& replacement) {
-            struct SourceRendererIdentity {
-                void* mesh{};
-                int depthFromSourceRoot{};
-                std::string rendererName;
-            };
-
             std::vector<void*> targets;
-            std::vector<void*> rememberedSources;
+            std::vector<ReapplyRendererIdentity> identities;
             {
                 std::lock_guard lock(g_reversiblePatchMutex);
-                if (const auto restored = g_reapplyRootsByMod.find(replacement.modId);
-                    restored != g_reapplyRootsByMod.end()) {
-                    for (const auto root : restored->second) AddUniqueLiveObject(targets, root);
-                }
-                if (const auto remembered = g_loadedSourceGameObjects.find(
-                        NormalizeAssetName(replacement.sourceName));
-                    remembered != g_loadedSourceGameObjects.end()) {
-                    rememberedSources = remembered->second;
+                if (const auto remembered = g_reapplyRendererIdentities.find(replacement.modId);
+                    remembered != g_reapplyRendererIdentities.end()) {
+                    for (const auto& identity : remembered->second) {
+                        if (NormalizeAssetName(identity.sourceName)
+                            == NormalizeAssetName(replacement.sourceName)) {
+                            identities.push_back(identity);
+                        }
+                    }
                 }
             }
 
             const auto rendererClass = Il2cppUtils::GetClass(
                 "UnityEngine.CoreModule.dll", "UnityEngine", "SkinnedMeshRenderer");
-            if (!rendererClass) return targets;
+            if (!rendererClass || identities.empty()) return targets;
 
-            std::vector<SourceRendererIdentity> sourceRenderers;
-            for (const auto source : rememberedSources) {
-                if (!source || !IsNativeObjectAlive(source)) continue;
-                AddUniqueLiveObject(targets, source);
-                const auto renderers = reinterpret_cast<UnityResolve::UnityType::GameObject*>(
-                    source)->GetComponentsInChildren<void*>(rendererClass, true);
-                for (const auto renderer : renderers) {
-                    const auto mesh = GetSkinnedMeshRendererSharedMesh(renderer);
-                    if (!mesh) continue;
-                    const SourceRendererIdentity identity{
-                        mesh,
-                        GetComponentDepthFromRoot(renderer, source),
-                        GetUnityObjectNameString(renderer),
-                    };
-                    const auto duplicate = std::find_if(
-                        sourceRenderers.begin(), sourceRenderers.end(),
-                        [&identity](const auto& current) {
-                            return current.mesh == identity.mesh
-                                && current.depthFromSourceRoot == identity.depthFromSourceRoot
-                                && current.rendererName == identity.rendererName;
-                        });
-                    if (duplicate == sourceRenderers.end()) sourceRenderers.push_back(identity);
-                }
-            }
-
-            if (!sourceRenderers.empty()) {
-                const auto renderers = rendererClass->FindObjectsByType<void*>();
-                for (const auto renderer : renderers) {
-                    if (!renderer || !IsNativeObjectAlive(renderer)) continue;
-                    const auto mesh = GetSkinnedMeshRendererSharedMesh(renderer);
-                    const auto rendererName = GetUnityObjectNameString(renderer);
-                    const auto identity = std::find_if(
-                        sourceRenderers.begin(), sourceRenderers.end(),
-                        [mesh, &rendererName](const auto& current) {
-                            return current.mesh == mesh
-                                && (current.rendererName.empty()
-                                    || current.rendererName == rendererName);
-                        });
-                    if (identity == sourceRenderers.end()) continue;
-                    AddUniqueLiveObject(
-                        targets,
-                        GetSourceRootGameObject(renderer, identity->depthFromSourceRoot));
-                }
+            // Resolve only against the current renderer snapshot.  The previous
+            // implementation walked GameObjects retained from earlier scenes;
+            // IsNativeObjectAlive was not enough to make that raw pointer safe.
+            const auto liveRenderers = rendererClass->FindObjectsByType<void*>();
+            for (const auto renderer : liveRenderers) {
+                if (!renderer || !IsNativeObjectAlive(renderer)) continue;
+                const auto mesh = GetSkinnedMeshRendererSharedMesh(renderer);
+                if (!mesh) continue;
+                const auto rendererName = GetUnityObjectNameString(renderer);
+                const auto identity = std::find_if(
+                    identities.begin(),
+                    identities.end(),
+                    [mesh, &rendererName](const auto& current) {
+                        return current.originalMesh == mesh
+                            && (current.rendererName.empty()
+                                || current.rendererName == rendererName);
+                    });
+                if (identity == identities.end()) continue;
+                AddUniqueLiveObject(
+                    targets,
+                    GetSourceRootGameObject(renderer, identity->sourceRootDepth));
             }
             return targets;
         }
@@ -3906,7 +3895,6 @@ namespace GakumasMod::Runtime {
         }
 
         void* ReplaceLocalModAssetIfNeeded(void* originalResult, const std::string& sourceName) {
-            RememberLoadedSourceGameObject(sourceName, originalResult);
             const auto replacement = FindLocalModAssetReplacement(sourceName);
             if (!replacement) return originalResult;
 
@@ -4868,8 +4856,7 @@ namespace GakumasMod::Runtime {
         {
             std::lock_guard lock(g_reversiblePatchMutex);
             g_reversibleRendererPatches.clear();
-            g_reapplyRootsByMod.clear();
-            g_loadedSourceGameObjects.clear();
+            g_reapplyRendererIdentities.clear();
         }
         {
             std::lock_guard lock(g_animationRigMutex);

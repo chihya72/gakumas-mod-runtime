@@ -6,6 +6,9 @@
 xinput1_3.dll
 gakumas-mod\config.json
 README.txt
+LICENSE
+third-party-notices.md
+licenses\
 ```
 
 `.dll` **不在 Gitea 附件白名单里**（只允许 `.zip` / `.gz` / `.tgz` 等），所以发布物
@@ -16,25 +19,25 @@ README.txt
 不依赖 CI，任何时候都能跑：
 
 ```powershell
-.\tools\package.ps1 -Version v0.1.0
+.\tools\package.ps1 -Version v0.2.0
 ```
 
-它会依次 `generate.bat`、MSBuild Release x64、跑离线测试，然后在 `dist\` 下生成
-`gakumas-mod-runtime-0.1.0.zip` 并打印 zip 和 DLL 的 SHA-256。任一步失败就中断，
+它会依次运行仓库内 Premake、MSBuild Release x64、离线测试，然后在 `dist\` 下生成
+`gakumas-mod-runtime-0.2.0.zip`，附带项目和第三方许可证，并打印 zip 和 DLL 的 SHA-256。任一步失败就中断，
 不会产出半成品包。
 
 已经编译过、只想重新打包：
 
 ```powershell
-.\tools\package.ps1 -Version v0.1.0 -SkipBuild
+.\tools\package.ps1 -Version v0.2.0 -SkipBuild
 ```
 
 拿到 zip 后网页上传，或者用脚本创建 release：
 
 ```powershell
 $env:GITEA_TOKEN = "<个人访问令牌，需要 write:repository>"
-.\tools\publish-release.ps1 -Tag v0.1.0 `
-    -Zip dist\gakumas-mod-runtime-0.1.0.zip `
+.\tools\publish-release.ps1 -Tag v0.2.0 `
+    -Zip dist\gakumas-mod-runtime-0.2.0.zip `
     -ApiBase https://git.chinosk6.cn/api/v1 `
     -Repository chihya72/gakumas-mod-runtime
 ```
@@ -46,8 +49,8 @@ $env:GITEA_TOKEN = "<个人访问令牌，需要 write:repository>"
 方便在不浪费标签的情况下验证流水线。
 
 ```powershell
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 ### 前提：一台 Windows runner
@@ -81,11 +84,11 @@ Gitea 默认从 github.com 拉取 action。如果实例访问不了 GitHub，`ac
 
 ## 版本号
 
-`GKMS_VERSION` 在 premake **生成阶段**读取（不是编译阶段），`package.ps1` 会在调用
-`generate.bat` 之前设好。它被编进 DLL，启动时写进日志：
+`GKMS_VERSION` 在 premake **生成阶段**读取（不是编译阶段），`package.ps1` 会在运行
+`tools\premake5.exe vs2022` 之前设好。它被编进 DLL，启动时写进日志：
 
 ```text
-[BOOT] GakumasMod: [ModAsset] gakumas-mod-runtime v0.1.0 loaded. logLevel=error ...
+[BOOT] GakumasMod: [ModAsset] gakumas-mod-runtime v0.2.0 loaded. logLevel=error ...
 ```
 
 本地不设就是 `dev`。用户报问题时让他们贴这一行，比对 DLL 哈希省事得多。

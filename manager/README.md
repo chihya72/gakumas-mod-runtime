@@ -1,18 +1,17 @@
 # Gakumas In-Game Mod Manager
 
-学园偶像大师 DMM Windows 版的独立游戏内 AssetBundle Mod 管理器。
+学园偶像大师 DMM Windows 版 AssetBundle Mod Runtime 内置的游戏内管理器。
 
 管理器是本仓库 `xinput1_3.dll` 的一部分，由 Runtime 在自己的初始化线程末尾调用
 `GkmmInitialize()` 启动，通过 Runtime API v1 读取 Mod 目录和写入启用状态。它不使用
 汉化插件注入，不替换 `version.dll`，也不承担 Mesh、材质或 AssetBundle 替换工作。
 
-早期版本是独立的 `xinput9_1_0.dll`，靠 `GetModuleHandleW` 找 Runtime 并轮询最多 60 秒
-等它就绪。合并进同一个 DLL 后加载顺序和就绪竞争都不存在，那套握手已删除；
-`GmrGetRuntimeApiV1` 导出保留，仍是 UI 与 Runtime 之间唯一的接口。
+旧的独立管理器入口、跨模块轮询和双 DLL 部署已经删除，Release 不再生成或加载第二个管理器
+DLL。`GmrGetRuntimeApiV1` 导出保留，仍是 UI 与 Runtime 之间唯一的接口。
 
 ## 当前状态
 
-截至 2026-08-01，以下主链已经在目标游戏中完成实机验证：
+截至 2026-08-05，以下主链已经在目标游戏中完成实机验证：
 
 ```text
 xinput1_3.dll 自动加载
@@ -35,21 +34,6 @@ xinput1_3.dll 自动加载
 - 开关写回成功，页面状态和 Runtime 当前会话会立即刷新；
 - 管理器与 Mod Runtime 同处 `xinput1_3.dll`，与汉化 `version.dll` 保持独立。
 
-12:23 文字探针的历史实机基线：
-
-```text
-build\bin\x64\Release\xinput9_1_0.dll
-大小：196608 字节
-SHA-256：4AEFBEE12BC11509ACCFF62BA660D387AD395FA947B69AD0D9ECA19E82F7DBD5
-```
-
-18:20–18:21 全屏页、分页和开关写回对应的 DLL：
-
-```text
-大小：240640 字节
-SHA-256：221760876D257C45B37B22C10390BF9DCD6E197050E4D7BA0F4F3CBDD4377864
-```
-
 在上述实机基线上，当前源码和部署版还包括：
 
 - Runtime JSON 解析已从 `CampusUiProbe.cpp` 拆到独立快照模块；
@@ -69,15 +53,11 @@ SHA-256：221760876D257C45B37B22C10390BF9DCD6E197050E4D7BA0F4F3CBDD4377864
 - 后续截图已确认固定行、服装 Master 名称和官方服装缩略图可见；同时确认开关写入成功后视觉状态会被原生组件二次反转，发型的完整资源名未能按逻辑 ID 命中 `CostumeHead`。
 - 当前源码在 `EventSystem.Update()` 原始输入处理结束后统一校正开关视觉状态，并归一化发型逻辑 ID、`mdl_chr_` 前缀、资源路径和 `_hair` 后缀；后续实机日志和截图已确认开关连续校正、发型名称“月村手毬 · 公主皇冠”命中。
 - 发型预览走和服装同一条 `CostumeThumbnailView.Set(ICostume)`：master `CostumeHead` 实现 `ICostume`。早先只调基类 `ThumbnailViewBase.Set(assetName)` 的写法会留下未初始化的空态标签并丢失长按详情，已删除。
-- Runtime 启动时注册全部有效替换候选但仍保持 AssetBundle 懒加载；标准 `SkinnedMeshRenderer` 规则会保存替换前的 Mesh、材质和骨骼绑定。关闭和重新开启的热切换主链已经实机生效。IDA MCP 后为即时颜色加入的底层材质数组钩子和崩溃排查扫描已全部撤回，当前恢复为“不崩溃、热切换生效、直接回主页颜色可能错误、切页恢复”的调查前基线。整对象替换和附加式规则仍按重新加载资源降级。
+- Runtime 启动时注册全部有效替换候选但仍保持 AssetBundle 懒加载；标准 `SkinnedMeshRenderer` 规则会保存替换前的 Mesh、材质和骨骼绑定。关闭和重新开启的热切换主链已经实机生效。IDA MCP 后为即时颜色加入的底层材质数组钩子和崩溃排查扫描已全部撤回，当前恢复为“不崩溃、热切换生效、直接回主页颜色可能错误、进入一次换装页面恢复”的调查前基线。整对象替换和附加式规则仍按重新加载资源降级。
 - 导航现在按页面身份幂等处理：Mod 页再次点“Mod 管理”只关闭菜单层；系统设置页点“Mod 管理”原位重构；Mod 页点系统设置则调用游戏的 `ICampusScreen.Reload()` 原位恢复干净设置页，避免多个 `SettingTopScreen` 交叉压栈。Reload 同时失效当前 `MenuView` 的注入缓存，使同地址菜单重新创建“Mod 管理”入口。
 
-当前已部署、待实机验证的合并构建（2026-08-03，Runtime + 管理器同一个 DLL）：
-`673280` 字节，SHA-256
-`95D1BE29642388CB79A3DF2F32D99E09F40F870D91E3FE04C816484DD9670D49`。
-
-> 上面的历史基线是**证据记录**，对应当时的截图和日志，不要改；只有这一行"当前"需要
-> 随重编译更新。核对用 `Get-FileHash <游戏目录>\xinput1_3.dll -Algorithm SHA256`。
+当前 Release 构建和部署哈希以对应 release notes 与本机 `Get-FileHash` 结果为准，不在多份
+设计文档中手抄，避免构建更新后产生第二套“当前哈希”。
 
 ## 当前 UI 的边界
 
@@ -88,9 +68,9 @@ SHA-256：221760876D257C45B37B22C10390BF9DCD6E197050E4D7BA0F4F3CBDD4377864
 - 原生滚动区域、服装/发型分页、逐项开关和写回后刷新已经实机确认；
 - 新固定行、服装 Master 名称、官方服装缩略图和发型 Master 名称已由截图确认；发型官方预览图直连路径待复验；
 - Runtime 写回、开关视觉校正和标准替换热开关主链均已由实机确认；当前已撤回即时颜色实验，
-  保留切页恢复的已知缺陷；
+  保留进入一次换装页面恢复的已知缺陷；
 - 底栏星形分隔与橙条长度两个 UI 缺陷已实机确认修复（2026-08-02），**未解的只剩热开关后
-  直接回主页颜色错误**，切换一次页面即恢复；
+  直接回主页颜色错误**，进入一次换装页面即恢复；
 - 三种幂等导航分支已由上一部署版日志确认；最新的 Reload 后菜单入口缓存失效补丁已部署，仍需复验；
 - 返回主页、重登、不同分辨率和长期重复打开的完整生命周期矩阵尚未验收。
 - 当前源码已补充 PID/进程名并清除 Bootstrap 过期文案，但尚待新实机日志确认。
@@ -144,8 +124,7 @@ Visual Studio 2022 / MSBuild Release x64：
 在**仓库根**执行，管理器没有自己的 sln：
 
 ```powershell
-.\generate.bat
-msbuild build\gakumas_mod_runtime.sln /m /p:Configuration=Release /p:Platform=x64
+.\tools\package.ps1 -Version dev
 ```
 
 `mod_presentation_tests` 是不依赖游戏的离线测试，直接运行
@@ -177,7 +156,7 @@ error 级，默认也能看到。
 ## 下一步
 
 1. 执行 Mod → 设置 → 菜单，确认 Reload 后“Mod 管理”入口仍存在；再验证设置 → Mod 与 Mod → Mod 不叠页；
-2. 连续执行同一标准服装 Mod 的 ON/OFF/ON，并每次直接返回主页，确认颜色不再依赖切换其他页面刷新；
+2. 连续执行同一标准服装 Mod 的 ON/OFF/ON，并每次进入一次换装页面，确认颜色恢复且不崩溃；
 3. 打开发型分页，确认“月村手毬 · 公主皇冠”通过 CostumeHead 自身资源显示官方预览图；
 4. 实机触发启动时冲突组全关和运行中新 Mod 拒绝开启两种提示；
 5. 完成返回主页、重登、分辨率、异常降级和长期重复打开测试。

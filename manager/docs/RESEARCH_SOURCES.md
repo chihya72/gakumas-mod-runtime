@@ -1,6 +1,6 @@
 # 调查数据源与证据等级
 
-> 最后更新：2026-08-01 21:30
+> 最后更新：2026-08-05
 
 本文说明当前 Mod 管理器的签名从哪里来、哪些结论可以作为实现依据，以及接手者如何在
 游戏更新后重新验证。外部绝对路径是当前调查机输入，不是仓库运行依赖。
@@ -114,7 +114,7 @@ UnityEngine.UI.ScrollRect.get_content         设置页滚动内容
 - 同轮又确认 Reload 后 `MenuView` 地址不变，旧 `g_injectedViews` 记录让 `SetEventHook` 直接
   返回，导致菜单入口消失。最新源码在 Reload 成功后失效当前 View 缓存；该补丁只有本地
   构建证据，尚未升级为 A；
-- 用户确认标准服装热开关已经生效，但热 ON 后直接返回主页颜色错误，切换游戏页面后恢复。
+- 用户确认标准服装热开关已经生效，但热 ON 后直接返回主页颜色错误，进入一次换装页面后恢复。
   Runtime 日志同时记录 `targets=2, applied=2, refreshedRigs=1`，说明重应用成功而显示提交不完整；
 - ~~源码检查确认现有每材质 `MaterialPropertyBlock` 的旧贴图覆盖了克隆材质。~~
   **该结论已于 2026-08-02 被实机证伪**：互补探针显示游戏在这些场景从不调用
@@ -122,7 +122,7 @@ UnityEngine.UI.ScrollRect.get_content         设置页滚动内容
   `Renderer.set_sharedMaterials`。首个托管 setter 钩子在 04:04 热切换日志中没有触发，
   因此 Runtime 曾加入 IDA 已确认的 `Renderer.SetMaterialArray_Injected` 底层钩子。该实验及
   后续受限扫描连续导致启动卡住或 ON/OFF 崩溃，现已撤回；当前部署恢复为 IDA 调查前的
-  热切换基线，直接回主页的颜色缺陷仍通过切换页面恢复；
+  热切换基线，直接回主页的颜色缺陷仍通过进入一次换装页面恢复；
   真因与下一步见 `../../docs/roadmap.md`「唯一未解缺陷」。
 
 IDA 进一步确认底层写入链：`VLActorFaceModel.UpdateSharedMaterials()`

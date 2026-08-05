@@ -1,6 +1,6 @@
 # 当前状态与路线
 
-> 最后更新：2026-08-02
+> 最后更新：2026-08-05
 > “已实现”不自动等于“已实机验收”。最新材质数组恢复与两栏橙条补丁已完成本地 Release
 > 构建，仍需由用户手动启动游戏复验。
 
@@ -33,6 +33,9 @@
 - `UnityEngine.Renderer::SetPropertyBlock(MaterialPropertyBlock,int)`；
 - `UnityEngine.Material::SetTexture(int/string,Texture)`。
 
+后三条保留为兼容性快照/诊断 Hook；当前已验证场景没有调用它们写回 Mod 材质，不能再把
+`PropertyBlock` 或 `Material.SetTexture` 描述为热 ON 颜色问题的成因。
+
 当前不安装 `AssetBundleRequest::get_allAssets()` Hook，也不安装：
 
 - `Object::Internal_CloneSingle`；
@@ -55,11 +58,11 @@
 ### 唯一未解缺陷：热 ON 后直接回主页颜色错误
 
 现象：主页 → 菜单 → Mod 管理 → 开关 → **直接返回主页**，网格是 Mod 的、颜色是原版的；
-打开任意其它页面再回主页就正常。当前部署已恢复为 IDA MCP 调查前「不崩溃且热切换生效」
+进入一次换装页面再回主页就正常。当前部署已恢复为 IDA MCP 调查前「不崩溃且热切换生效」
 的基线，暂不承诺即时颜色修复。
 
 **真因**：游戏在热重应用**之后**调用材质数组写回，把带 Mod 贴图的私有材质换掉。这是五轮
-排查里唯一被日志抓到的写入者。切页面之所以能恢复，是因为那条路重走了完整替换。
+排查里唯一被日志抓到的写入者。进入换装页面之所以能恢复，是因为那条路重走了完整替换。
 
 IDA 已确认底层写入链（两条都汇到 `Renderer::SetMaterialArray_Injected`，它是
 `Renderer.set_sharedMaterials` 在 IL2CPP 里的实际写入路径）：
@@ -85,7 +88,7 @@ IDA 后实验性的 `SetMaterialArray_Injected` 钩子、按钮帧末队列和�
 ## 下一步优先级
 
 1. 实机执行同一标准服装 Mod 的 ON/OFF/ON，确认已恢复“不崩溃、热切换生效、直接回主页
-   颜色可能错误、切页恢复”的基线；
+   颜色可能错误、进入一次换装页面恢复”的基线；
 2. 实机覆盖启动时冲突组全部关闭、运行中新 Mod 被拒绝的两条冲突分支；
 3. 用真实 hair Mod 验证 `Geo_Hair` 与 `Geo_HairProp` 双 Renderer 的热恢复；
 4. 把 `appliedThisSession` 接到所有真实应用和热恢复结果，而不是仅保留目录字段；

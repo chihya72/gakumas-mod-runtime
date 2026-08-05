@@ -3,6 +3,8 @@
 这是学园偶像大师本地 AssetBundle Mod 的独立游戏运行时。它通过 `xinput1_3.dll` 代理入口加载，
 只负责扫描本地 Mod、拦截游戏资源加载并替换 Mesh、骨架映射和贴图。
 
+当前发布版本：`0.2.0`。
+
 本仓库不保存游戏提取资产、成品 Mod、旧测试 AB 包或生成报告。
 
 ## 当前能力
@@ -38,7 +40,7 @@ manifest 格式见 [docs/manifest-v2.md](docs/manifest-v2.md)，当前限制和�
 - 热重应用日志记录目标、应用数和活动 Animation Rig 刷新。
 
 当前已恢复到 IDA MCP 调查前的已验证基线：标准服装 OFF/ON 热切换不崩溃，但热 ON 后
-直接返回主页仍可能颜色错误；切换一次游戏页面后恢复正常。
+直接返回主页仍可能颜色错误；进入一次换装页面后恢复正常。
 
 > **已证伪：**「Renderer 已有的每材质 `MaterialPropertyBlock` 旧贴图覆盖克隆材质」这一
 > 结论是错的。实机探针确认游戏在这些场景**从不调用 `Renderer.SetPropertyBlock`**，
@@ -61,9 +63,8 @@ Get-FileHash <游戏目录>\xinput1_3.dll -Algorithm SHA256
 
 要求 Visual Studio 2022 与 C++ 桌面开发组件。
 
-```bat
-generate.bat
-msbuild build\gakumas_mod_runtime.sln /p:Configuration=Release /p:Platform=x64
+```powershell
+.\tools\package.ps1 -Version dev
 ```
 
 产物：
@@ -72,7 +73,8 @@ msbuild build\gakumas_mod_runtime.sln /p:Configuration=Release /p:Platform=x64
 build/bin/x64/Release/xinput1_3.dll
 ```
 
-`generate.bat` 使用仓库内固定的 Premake 5.0.0-beta1。第三方组件和许可证见
+打包脚本直接调用仓库内固定的 Premake 5.0.0-beta1，并通过 `vswhere` 定位 MSBuild；构建、
+离线测试或打包任一步失败都会中止。第三方组件和许可证见
 [third-party-notices.md](third-party-notices.md)。
 
 ## 安装
@@ -126,5 +128,5 @@ python -m unittest discover -s tests -v
 ```
 
 当前 Release 构建已通过，Python `unittest discover` 的 4 项测试通过。完整验收还应核对
-`xinput1_3.def` 的 9 个导出（8 个 XInput 代理 + `GmrGetRuntimeApiV1`），并在目标游戏复验热 ON/OFF/ON 后无需切换页面即可得到正确
-Mesh、材质、骨骼和颜色。
+`xinput1_3.def` 的 9 个导出（8 个 XInput 代理 + `GmrGetRuntimeApiV1`），并在目标游戏复验热 ON/OFF/ON；
+若热开启后主页颜色暂未刷新，进入一次换装页面，确认 Mesh、材质、骨骼和颜色恢复正确。

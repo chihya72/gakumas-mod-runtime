@@ -11,6 +11,9 @@ gakumas-mod-runtime
     <游戏目录>\xinput1_3.dll
     <游戏目录>\gakumas-mod\config.json
 
+项目与第三方许可说明位于压缩包根目录的 `LICENSE`、`third-party-notices.md` 和
+`licenses\`。这些文件不影响运行，重新分发本包时必须一并保留。
+
 已经装过的话直接覆盖 `xinput1_3.dll` 即可；`gakumas-mod\config.json` 若已存在
 请勿覆盖，那是你自己的设置。
 

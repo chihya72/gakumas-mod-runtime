@@ -88,9 +88,9 @@ GmrResult setModEnabled(const char* modIdUtf8, uint8_t enabled);
 - OFF 恢复当前场景实例和缓存 Prefab 的原 Mesh、共享材质、骨骼和根骨；
 - ON 只对目标服装/发型资源子树重应用 Mesh、材质、骨骼和贴图；
 - 活动 `CampusActorAnimationRig` 会补齐新动态骨并刷新；
-- Runtime 刷新 Renderer 和目标节点，目标是无需玩家手动切换游戏页面。
+- Runtime 刷新 Renderer 和目标节点；实机验收时进入一次换装页面确认颜色刷新。
 
-> 当前部署版热 ON 后仍需切换一次页面颜色才正确。原因是游戏在重应用之后调用
+> 当前部署版热 ON 后仍需进入一次换装页面，颜色才正确。原因是游戏在重应用之后调用
 > `Renderer.set_sharedMaterials` 换掉了 Mod 私有材质；早期文档归因于
 > `MaterialPropertyBlock` 覆盖，该结论已被实机证伪。IDA 后的底层材质数组钩子因加载卡住
 > 和点击崩溃已撤回；当前恢复为调查前的热切换基线。真因与下一步见
@@ -124,5 +124,5 @@ GmrResult setModEnabled(const char* modIdUtf8, uint8_t enabled);
   Python `unittest discover` 的 4 项；
 - 目标游戏已确认快照、Manifest 写回和标准服装热 OFF/ON 生效；
 - 当前部署为 IDA MCP 调查前的 Runtime：标准热 OFF/ON 生效且此前实机不崩溃，
-  但直接返回主页的颜色仍依赖切换页面刷新；
+  但直接返回主页的颜色仍依赖进入一次换装页面刷新；
 - API 头文件 `src/runtime/ModRuntimeApi.h` 现在只有一份，Manager 直接包含它。

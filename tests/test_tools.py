@@ -131,11 +131,11 @@ class RuntimeSourceContractTest(unittest.TestCase):
 
         for symbol in (
             "struct ReversibleRendererPatch",
+            "struct ReapplyRendererIdentity",
             "RegisterReversibleRendererPatch",
             "RestoreLiveModInstances",
             "CollectLiveReapplyTargets",
             "ReapplyLiveModInstances",
-            "SourceRendererIdentity",
             "RefreshAnimationRigsAfterHotReapply",
             "RefreshSkinnedMeshRendererState",
             "ReactivateGameObject",
@@ -143,9 +143,11 @@ class RuntimeSourceContractTest(unittest.TestCase):
             "CaptureRendererPropertyBlockSnapshot",
             "RestoreRendererPropertyBlockSnapshots",
             "GetComponentDepthFromRoot",
-            "RememberLoadedSourceGameObject(sourceName, originalResult);",
+            "g_reapplyRendererIdentities",
         ):
             self.assertIn(symbol, source)
+        self.assertNotIn("g_loadedSourceGameObjects", source)
+        self.assertNotIn("RememberLoadedSourceGameObject", source)
 
         toggle = source[source.index("GmrResult SetSessionModEnabled") : source.index("bool Initialize()")]
         self.assertIn("stateChanged && requestedEnabled", toggle)
@@ -153,14 +155,31 @@ class RuntimeSourceContractTest(unittest.TestCase):
         self.assertIn("RestoreLiveModInstances(modIdUtf8)", toggle)
         self.assertNotIn("existing instances refresh after asset reload", toggle)
 
+        restore = source[
+            source.index("size_t RestoreLiveModInstances") : source.index("bool ApplySkinnedMeshReplacement")
+        ]
+        self.assertIn("const auto liveRenderers = rendererClass->FindObjectsByType<void*>()", restore)
+        self.assertIn("liveRendererSet.contains(renderer)", restore)
+        self.assertNotIn("IsNativeObjectAlive(patch.patchedRenderer)", restore)
+
         collect = source[
             source.index("std::vector<void*> CollectLiveReapplyTargets") :
             source.index("size_t ReapplyLiveModInstances")
         ]
         self.assertIn(
-            "GetSourceRootGameObject(renderer, identity->depthFromSourceRoot)",
+            "const auto liveRenderers = rendererClass->FindObjectsByType<void*>()",
             collect,
         )
+        self.assertIn(
+            "GetSkinnedMeshRendererSharedMesh(renderer)",
+            collect,
+        )
+        self.assertIn(
+            "GetSourceRootGameObject(renderer, identity->sourceRootDepth)",
+            collect,
+        )
+        self.assertNotIn("GetComponentsInChildren<void*>(rendererClass, true)", collect)
+        self.assertNotIn("rememberedSources", collect)
         self.assertNotIn(
             "AddUniqueLiveObject(targets, GetHierarchyRootGameObject(renderer))",
             collect,

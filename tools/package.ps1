@@ -2,7 +2,7 @@
 # you -- a release must be reproducible without a runner.
 #
 #   .\tools\package.ps1                 # dist\gakumas-mod-runtime-dev.zip
-#   .\tools\package.ps1 -Version v0.1.0
+#   .\tools\package.ps1 -Version v0.2.0
 #   .\tools\package.ps1 -SkipBuild      # package whatever is already built
 #
 # The zip mirrors the game directory, so it extracts straight into the game root:
@@ -10,6 +10,9 @@
 #   xinput1_3.dll
 #   gakumas-mod\config.json
 #   README.txt
+#   LICENSE
+#   third-party-notices.md
+#   licenses\...
 #
 # .dll is not in the Gitea attachment allowlist, which is the other reason the
 # release artifact is a zip rather than the bare DLL.
@@ -45,15 +48,15 @@ function Find-MSBuild {
 
 if (-not $SkipBuild) {
     # premake reads GKMS_VERSION at generate time, so it has to be set before
-    # generate.bat -- not just before the compile.
+    # project generation -- not just before the compile.
     $env:GKMS_VERSION = $Version
     Write-Host "==> generate (GKMS_VERSION=$Version)"
-    & (Join-Path $repo "generate.bat")
+    & (Join-Path $repo "tools\premake5.exe") "vs2022"
     if ($LASTEXITCODE -ne 0) { throw "premake failed ($LASTEXITCODE)" }
 
     Write-Host "==> build $Configuration x64"
     & (Find-MSBuild) (Join-Path $repo "build\gakumas_mod_runtime.sln") `
-        /m "/p:Configuration=$Configuration" /p:Platform=x64 /v:minimal
+        /m /t:Rebuild "/p:Configuration=$Configuration" /p:Platform=x64 /v:minimal
     if ($LASTEXITCODE -ne 0) { throw "MSBuild failed ($LASTEXITCODE)" }
 
     Write-Host "==> offline tests"
@@ -67,9 +70,15 @@ if (-not (Test-Path $dll)) { throw "missing $dll -- build first, or drop -SkipBu
 Write-Host "==> stage"
 if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }
 New-Item -ItemType Directory -Force (Join-Path $staging "gakumas-mod") | Out-Null
+New-Item -ItemType Directory -Force (Join-Path $staging "licenses") | Out-Null
 Copy-Item $dll (Join-Path $staging "xinput1_3.dll")
 Copy-Item (Join-Path $repo "packaging\config.json") (Join-Path $staging "gakumas-mod\config.json")
 Copy-Item (Join-Path $repo "packaging\README.txt") (Join-Path $staging "README.txt")
+Copy-Item (Join-Path $repo "LICENSE") (Join-Path $staging "LICENSE")
+Copy-Item (Join-Path $repo "third-party-notices.md") (Join-Path $staging "third-party-notices.md")
+Copy-Item (Join-Path $repo "deps\minhook\LICENSE.txt") (Join-Path $staging "licenses\MinHook-LICENSE.txt")
+Copy-Item (Join-Path $repo "src\deps\UnityResolve\LICENSE") (Join-Path $staging "licenses\UnityResolve-LICENSE.txt")
+Copy-Item (Join-Path $repo "src\deps\nlohmann\LICENSE.MIT") (Join-Path $staging "licenses\nlohmann-json-LICENSE.MIT")
 
 New-Item -ItemType Directory -Force $dist | Out-Null
 if (Test-Path $zip) { Remove-Item -Force $zip }
