@@ -22,6 +22,19 @@
    `xinput1_3.dll` 并存，而整个调查只盯着后者——真因在前者。
 6. **隐藏 GameObject 不等于改变组件的逻辑集合。** 把按钮设为 inactive 不会改变原生组件从
    序列化字段算出来的 `ActiveTabButtons`，所以按它算的尺寸不会跟着变。
+7. **抓帧要比内容 hash，不是文件名 hash。** 3DMigoto 文件名里的 `ps-cb0=a298507e` 是
+   **资源创建时**的 hash；常量缓冲每帧 Map 重写，这个值永远不变。两帧的常量缓冲看着
+   「一模一样」纯属错觉。真正的内容 hash 在 `log.txt` 的
+   `Dumping ... -> FrameAnalysisDeduped\XXXX.buf` 里。这个坑让「两帧完全相同」的错误结论
+   连续成立了两轮。
+8. **输入全都一样而输出不同，说明还有没比到的输入。** 不要因此怀疑对方的操作。本轮就是
+   把 `vb0` 的差异当成「姿势不同」放过了——它同时装着 POSITION/NORMAL/TANGENT，法线的
+   差异就藏在里面。用户坚持两次抓帧确实是亮和暗，这个坚持是对的。
+9. **需要看输出就把输出 dump 出来。** `analyse_options` 加 `dump_rt` 之后，一份抓帧就能
+   回答「这个 draw 画完的瞬间已经错了没有」，比反复对比输入快一个数量级。验完记得去掉。
+10. **自己装的 Hook 会拦自己的还原写入。** `Material.SetTexture` 的 Hook 会把参数换成已
+    登记的 Mod 贴图，于是「还原原始贴图」的调用返回成功、日志打印成功、内容纹丝不动。
+    还原前必须先注销 override。这是第 1 条的又一个实例。
 
 ---
 
@@ -34,9 +47,14 @@
 | 即时提交补丁没被调用 | **错**。调用点确实在替换之后 |
 | `SettingTopScreenPresenter.SetEvent()` 是接管设置页的唯一 Hook 点 | **错**。当前 PC 的真实创建流程绕过或内联了它，必须用主线程 `EventSystem.Update()` 兜底 |
 | 3DMigoto 时代的「shader 变体重排贴图槽位」对 AB 路线同样成立 | **错**。Unity 按属性名绑定，与寄存器槽位无关 |
+| 热 ON 颜色错误的真因是游戏在热重应用之后重新赋值材质数组 | **错**。抓帧对比证伪：暗色帧和正常帧的身体 draw 在 Mesh、8 张贴图、材质常量、shader 变体和渲染状态上逐字节相同。这条错误结论撑了五轮修复 |
+| 热路径也该像冷路径那样克隆私有材质 | **错**。活体角色的材质是游戏自己维护的 per-actor 拷贝，换成克隆等于把 renderer 从游戏的更新链上摘下来。热路径应当直接写游戏那份，并快照原贴图供 OFF 还原 |
+| 可以调 `CampusActorModelParts.InitializeCampusMaterials()` 刷新派生材质状态 | **错**。在活体 actor 上重跑会把整个材质数组换成 shader 无属性的空材质（审计打出 `keywords=[] floats=[]`），角色变洋红，后续开关全废。已从源码删除并留注释 |
+| 放掉 gchandle 就等于释放了克隆的 Mesh | **错**。Mesh 是原生 Unity 对象，GC 只管托管包装。必须 `Object.Destroy`，否则每次热 ON 泄漏约 16 MB |
 
-真正的写入者是游戏在热重应用之后重新赋值材质数组，把带 Mod 贴图的私有材质换掉。
-这条至今未修，当前保留「切一次页面即恢复」的基线。
+**真因（2026-08-09 定案）**：`TransformModMeshVerticesToOriginalRendererSpace` 换空间时
+只搬顶点，法线和切线留在原地。冷路径两端都是 prefab 单位阵，空操作；热路径的目标是有真实
+旋转的活体角色，于是法线与几何脱节。量化见 [`roadmap.md`](roadmap.md)。
 
 ---
 
@@ -53,9 +71,12 @@
 | 热路径里调 `Object.IsNativeObjectAlive` 做存活检查 | 崩 |
 | 管理器把 ON/OFF 放进帧末队列规避重入 | 只是为排查崩溃临时加的，问题不在这里，已撤回 |
 | 四条 `Object::Internal_Clone/Instantiate` 热路径 Hook | 与暗色渲染问题无关（真因是环境残留），同日回退 |
+| 热重应用后调 `CampusActorModelParts.InitializeCampusMaterials()` | 材质数组被换成空 shader 材质，角色洋红，之后所有开关失效 |
+| 活体路径继续灌每材质 `MaterialPropertyBlock` | 贴图已经写在材质上，这层多余；已只在冷路径保留 |
 
 **结论**：这条链上凡是「在 Unity 正在更新角色层级时做全局对象扫描」或「跨帧持有 Unity
 对象指针」的做法都会崩。当前实现只使用刚从 `GetComponentsInChildren` 拿到的组件指针。
+另外，**不要在活体 actor 上重跑游戏自己的初始化方法**——它们假定的是构建期的上下文。
 
 ---
 
@@ -86,9 +107,14 @@
    互相打架。现在只有 `manager/README.md` 维护一行「当前」，release 的哈希由发布脚本写进
    release notes，其余文档一律不抄。
 4. **同一事实不要在多份文档各存一份。** 实机证据时间线一度存在三份副本，改一处漏两处。
+5. **托管异常会直接穿过 native 帧。** `CampusActorAnimationRig.RegisterBones` 抛出后，
+   热重应用后面的代码一行都没跑：renderer 没刷新、状态没落盘、catalog 和 runtime 状态
+   分叉，表现成「开关点了没反应」。本项目不开 C++ 异常，所以要拦得用 `__try/__except`。
+6. **Unity 原生对象不归 GC 管。** Mesh、Material 这些 `Instantiate` 出来的对象，放掉
+   gchandle 只让托管包装可回收，原生内存要 `Object.Destroy` 才还。
 
 ---
 
-未解缺陷的真因与下一步见 [`roadmap.md`](roadmap.md)；UI 流程与安全边界见
+已解决缺陷的真因与仍未解的三条见 [`roadmap.md`](roadmap.md)；UI 流程与安全边界见
 [`../manager/docs/UI_FLOW.md`](../manager/docs/UI_FLOW.md)。逐轮排查日志、暗色渲染误判的
 完整过程和独立入口 DLL 的证据已随本文合并删除，需要时从 git 历史取。

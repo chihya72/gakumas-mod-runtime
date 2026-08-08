@@ -1,6 +1,6 @@
 # 调查数据源与证据等级
 
-> 最后更新：2026-08-05
+> 最后更新：2026-08-09
 
 本文说明当前 Mod 管理器的签名从哪里来、哪些结论可以作为实现依据，以及接手者如何在
 游戏更新后重新验证。外部绝对路径是当前调查机输入，不是仓库运行依赖。
@@ -114,23 +114,20 @@ UnityEngine.UI.ScrollRect.get_content         设置页滚动内容
 - 同轮又确认 Reload 后 `MenuView` 地址不变，旧 `g_injectedViews` 记录让 `SetEventHook` 直接
   返回，导致菜单入口消失。最新源码在 Reload 成功后失效当前 View 缓存；该补丁只有本地
   构建证据，尚未升级为 A；
-- 用户确认标准服装热开关已经生效，但热 ON 后直接返回主页颜色错误，进入一次换装页面后恢复。
-  Runtime 日志同时记录 `targets=2, applied=2, refreshedRigs=1`，说明重应用成功而显示提交不完整；
 - ~~源码检查确认现有每材质 `MaterialPropertyBlock` 的旧贴图覆盖了克隆材质。~~
-  **该结论已于 2026-08-02 被实机证伪**：互补探针显示游戏在这些场景从不调用
-  `Renderer.SetPropertyBlock`，`Material.SetTexture` 也从不写我们的材质。真实写入者是
-  `Renderer.set_sharedMaterials`。首个托管 setter 钩子在 04:04 热切换日志中没有触发，
-  因此 Runtime 曾加入 IDA 已确认的 `Renderer.SetMaterialArray_Injected` 底层钩子。该实验及
-  后续受限扫描连续导致启动卡住或 ON/OFF 崩溃，现已撤回；当前部署恢复为 IDA 调查前的
-  热切换基线，直接回主页的颜色缺陷仍通过进入一次换装页面恢复；
-  真因与下一步见 `../../docs/roadmap.md`「唯一未解缺陷」。
+  **2026-08-02 实机证伪**：互补探针显示游戏在这些场景从不调用 `Renderer.SetPropertyBlock`，
+  `Material.SetTexture` 也从不写我们的材质；
+- ~~真实写入者是游戏在热重应用之后调用 `Renderer.set_sharedMaterials` 写回材质数组。~~
+  **2026-08-09 抓帧证伪**：暗色帧与正常帧的身体 draw 在 Mesh、8 张贴图、材质常量缓冲、
+  shader 变体和渲染状态上逐字节相同，`[ModAudit]` 也显示回主页后材质仍是 Mod 的、贴图
+  仍绑着（`mod=1 textures=3/3`）。基于这条结论的 IDA 底层钩子实验已全部撤回；
+- **真因（2026-08-09，A 级）**：`TransformModMeshVerticesToOriginalRendererSpace` 换空间时
+  只搬顶点，法线和切线留在原地。用索引缓冲算面法线量化：冷路径 `mean(面法线·顶点法线)`
+  = +0.967 / 对齐 100%，热路径 = -0.233 / 对齐 73%。修复后热 ON 直接回主页颜色即正确，
+  同会话 12 轮 ON/OFF 全部通过。
 
-IDA 进一步确认底层写入链：`VLActorFaceModel.UpdateSharedMaterials()`
-（`0x0A88A6F4`）进入 `sub_7ABADF0`，最终调用
-`UnityEngine.Renderer::SetMaterialArray_Injected`；`CampusActorModelParts.AddCombinedOpaqueSubMesh()`
-（`0x03A06770`，调用点 `0x03A06DBC`）也通过 `sub_A380B70` 写入同一路径。橙条方面，
-`CampusSimpleTabButtonGroup.Initialize()`（`0x02459A7C`）才是把 `GetBarSize()` 写入
-`SelectedBarRect.sizeDelta` 的位置，`SetSelectIndex()` 只改位置。
+橙条方面，`CampusSimpleTabButtonGroup.Initialize()`（`0x02459A7C`）才是把 `GetBarSize()`
+写入 `SelectedBarRect.sizeDelta` 的位置，`SetSelectIndex()` 只改位置。
 
 12:23 截图中的菜单图标重叠只描述已废弃文字探针；18:20 之后的全屏截图才是当前 UI 证据。
 
@@ -149,7 +146,9 @@ IDA 进一步确认底层写入链：`VLActorFaceModel.UpdateSharedMaterials()`
 | 稳定排序 | `ModPresentationModel.cpp::SortItems` | 本地测试确认开关状态互换后顺序保持 `名称 + modId` |
 | Master 目标与缩略图 | `ResolveGameTarget` / `AttachOfficialGameThumbnail` | 服装名称与缩略图为 A；发型改走同一条 `CostumeThumbnailView.Set(ICostume)`（master `CostumeHead` 实现 `ICostume`，dump.cs 确认），空态标签与长按详情为 B，待实机复验 |
 | Runtime 热恢复 | `ModRuntime.cpp::SetModEnabled` / 热恢复扫描 | 用户确认 OFF/ON 生效，Runtime 日志记录重应用和 Rig 刷新 |
-| 即时颜色提交 | `ModRuntime.cpp::RestorePatchedMaterials` | **未修复**。旧 MPB 覆盖结论已被实机证伪（`SetPropertyBlock` 从不触发）；真实写入者是游戏调用 `set_sharedMaterials`。见 `../../docs/roadmap.md` |
+| 热 ON 颜色 | `ModRuntime.cpp::TransformModMeshVerticesToOriginalRendererSpace` | **已修复**（2026-08-09，A）。同时搬运法线与切线；抓帧量化与两条已证伪结论见 `../../docs/lessons-learned.md` |
+| 热 OFF 贴图还原 | `ModRuntime.cpp::RestoreModTexturesOnRenderer` | **已修复**（A）。必须先注销 override 再写，否则被 `Material.SetTexture` 的 Hook 换回 Mod 贴图 |
+| 热开关内存 | `ModRuntime.cpp::ReleaseRuntimeMeshClone` | **已修复**（A）。放 gchandle + `Object.Destroy`；日志 30/30 配对，克隆地址复用 |
 
 源码中存在、但没有对应实机结果的路径不得仅凭编译成功标为 A。
 

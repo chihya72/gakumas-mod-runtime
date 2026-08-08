@@ -1,8 +1,8 @@
 # 当前状态与路线
 
-> 最后更新：2026-08-05
-> “已实现”不自动等于“已实机验收”。最新材质数组恢复与两栏橙条补丁已完成本地 Release
-> 构建，仍需由用户手动启动游戏复验。
+> 最后更新：2026-08-09
+> “已实现”不自动等于“已实机验收”。本页只写已经验过的和明确没验过的，别把编译通过
+> 当成生效。
 
 ## 已实现
 
@@ -16,7 +16,13 @@
 - GameObject、Mesh、骨骼索引和贴图替换；
 - Mesh patch 失败保护；
 - 标准 `SkinnedMeshRenderer` 的可逆快照：Mesh、材质、骨骼、根骨和每材质 PropertyBlock；
+- 换空间时同时搬运顶点、法线和切线（切线 w 保留副切线符号）；
+- 热路径直接把 Mod 贴图写进游戏自己的 per-actor 材质，写前快照原贴图，OFF 时先注销
+  override 再写回；活体路径不再克隆私有材质，也不再灌 PropertyBlock；
+- 热 OFF 释放并 `Object.Destroy` 本次热 ON 克隆的 Mesh；
 - OFF 恢复当前实例与缓存 Prefab，ON 对目标资源子树热重应用；
+- 热重应用身份在资源加载时记录，不再依赖「先 OFF 过一次」；
+- `CampusActorAnimationRig.RegisterBones` 抛异常时用 SEH 兜住，不打断整个 toggle；
 - 活动 `CampusActorAnimationRig` 的动态骨补齐与刷新；
 - Renderer/节点刷新和持久贴图覆盖；
 - source profile、Validator 和 Author Doctor。
@@ -34,7 +40,10 @@
 - `UnityEngine.Material::SetTexture(int/string,Texture)`。
 
 后三条保留为兼容性快照/诊断 Hook；当前已验证场景没有调用它们写回 Mod 材质，不能再把
-`PropertyBlock` 或 `Material.SetTexture` 描述为热 ON 颜色问题的成因。
+`PropertyBlock`、`Material.SetTexture` 或材质数组写回描述为热 ON 颜色问题的成因。
+
+`Material.SetTexture` 的 Hook 会把参数换成已登记的 Mod 贴图，所以任何还原贴图的代码
+必须**先注销 override 再写**，否则写入会「成功」但内容不变。
 
 当前不安装 `AssetBundleRequest::get_allAssets()` Hook，也不安装：
 
@@ -48,47 +57,60 @@
 
 ## 实机状态
 
-已经确认：
+2026-08-09 已经确认（同一会话连续 12 轮 ON/OFF）：
 
 - 管理器通过 Runtime API 读取目录并写回开关；
 - Manifest 和当前会话状态同步改变；
-- 标准服装 Mod 热 OFF/ON 生效；
-- 热重应用日志记录 `targets=2, applied=2, refreshedRigs=1`。
+- 标准服装 Mod 热 OFF/ON 生效，**热 ON 后直接回主页颜色即正确**；
+- 每轮 OFF 的贴图还原是 `properties=3/3`，网格还原到原 Mesh；
+- 每轮 ON 的克隆都有配对的释放（`destroyed=1`），克隆地址被复用，内存不再增长。
 
-### 唯一未解缺陷：热 ON 后直接回主页颜色错误
+### 已解决：热 ON 后直接回主页颜色错误
 
-现象：主页 → 菜单 → Mod 管理 → 开关 → **直接返回主页**，网格是 Mod 的、颜色是原版的；
-进入一次换装页面再回主页就正常。当前部署已恢复为 IDA MCP 调查前「不崩溃且热切换生效」
-的基线，暂不承诺即时颜色修复。
+现象曾经是：主页 → 菜单 → Mod 管理 → 开关 → **直接返回主页**，网格是 Mod 的、颜色不对；
+进入一次换装页面再回主页就正常。
 
-**真因**：游戏在热重应用**之后**调用材质数组写回，把带 Mod 贴图的私有材质换掉。这是五轮
-排查里唯一被日志抓到的写入者。进入换装页面之所以能恢复，是因为那条路重走了完整替换。
+**真因**：`TransformModMeshVerticesToOriginalRendererSpace` 把 Mod 网格搬到目标 renderer
+空间时只搬顶点，法线和切线留在原地。冷路径的两个 renderer 都是 prefab 单位阵，这个变换
+等于空操作，所以从来没暴露；热路径的目标是场景里有真实旋转的活体角色，顶点转过去而法线
+没转，法线与几何脱节，着色结果就错。进入换装页面之所以能恢复，是那条路重新加载资源走冷
+路径，变换又变回单位阵。
 
-IDA 已确认底层写入链（两条都汇到 `Renderer::SetMaterialArray_Injected`，它是
-`Renderer.set_sharedMaterials` 在 IL2CPP 里的实际写入路径）：
+抓帧量化（`FrameAnalysis` + 索引缓冲算面法线）：
 
 ```text
-VLActorFaceModel.UpdateSharedMaterials()          → sub_7ABADF0  → SetMaterialArray_Injected
-CampusActorModelParts.AddCombinedOpaqueSubMesh()  → sub_A380B70  → SetMaterialArray_Injected
+冷路径（正常）  mean(面法线 · 顶点法线) = +0.967   对齐比例 100%
+热路径（发暗）  mean(面法线 · 顶点法线) = -0.233   对齐比例  73%
 ```
 
-**下一步**：围绕 `VLActorFaceModel.UpdateSharedMaterials` 验证热重应用的时序，在该写入完成
-之后补回 Mod 材质。继续只追 `SetPropertyBlock` 到不了这条路径——那条已被实机证伪。
-直接在底层 icall 上挂钩子的几种做法都试过并撤回了，原因见
-[`lessons-learned.md`](lessons-learned.md)。
+同一对帧的 Mesh、8 张贴图、材质常量缓冲、shader 变体和渲染状态逐字节相同——所以此前
+「游戏事后写回材质数组」的归因是错的，见 [`lessons-learned.md`](lessons-learned.md)。
 
 > 另有两个 UI 缺陷（底栏多一颗星形分隔、橙条按三栏比例）已于 2026-08-02 实机确认修复。
 
 部署版的大小与 SHA-256 不在文档里抄写——两处手抄的哈希曾经同时过期。release 的哈希在
 release notes 里，本机部署版用 `Get-FileHash` 自己算。
 
-IDA 后实验性的 `SetMaterialArray_Injected` 钩子、按钮帧末队列和受限 Renderer 扫描均已
-撤回；ON/OFF 调用链恢复为调查前的同步热恢复/热重应用实现。管理器 UI 修复不在回退范围内。
+### 已知未解
+
+1. **无摆动声明的骨也被挂上 `ActorSwingDynamicBone`**。`createBone` 不看 sidecar 有没有给
+   摆动参数，一律加组件。已发布包的 sidecar `newBones` 是空的（`chisaki-swimsuit`、
+   `hmsz-fuyuko-icu` 都是 0），于是 22 根源专属骨被做成 22 条长度 1 的链，
+   `CampusActorAnimationRig.RegisterBones` 抛 `ArgumentOutOfRangeException`。目前只有
+   `RegisterRigBonesGuarded` 的 SEH 兜底，toggle 不再被打断，但异常每次都发生。
+   **运行时这半的修法**：只有 sidecar 声明了摆动参数的骨才挂组件。
+   > 摆动链本身能不能跑（导出器要产出 `newBones`：摆动参数 + 链尾 tip）不属于本仓库，
+   > 规范见 `gakumas-modding/research/ab-route-notes.md` §3，进度在同仓库
+   > `research/current-status-and-roadmap.md`「逐项验证等级」第 4 项。
+2. **冷路径的克隆没人销毁**。游戏每次重新 `LoadAsset` body prefab 都会克隆一份 Mesh 和
+   两份私有材质，它们跟着 prefab 走。频率低于热开关，但长会话会累积；要动得先确定
+   prefab 何时真的不再被引用。
+3. **Mod 关闭后已加载的 prefab 仍是打过补丁的**，所以关掉之后再进换装页面可能仍显示 Mod。
 
 ## 下一步优先级
 
-1. 实机执行同一标准服装 Mod 的 ON/OFF/ON，确认已恢复“不崩溃、热切换生效、直接回主页
-   颜色可能错误、进入一次换装页面恢复”的基线；
+1. 只给 sidecar 声明了摆动参数的骨挂 `ActorSwingDynamicBone`，消掉每次热重应用都发生的
+   `RegisterBones` 异常；摆动链能否真的摆是 `gakumas-modding` 的导出器课题，不在本仓库；
 2. 实机覆盖启动时冲突组全部关闭、运行中新 Mod 被拒绝的两条冲突分支；
 3. 用真实 hair Mod 验证 `Geo_Hair` 与 `Geo_HairProp` 双 Renderer 的热恢复；
 4. 把 `appliedThisSession` 接到所有真实应用和热恢复结果，而不是仅保留目录字段；

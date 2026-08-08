@@ -51,7 +51,7 @@ gakumas-mod/mods/<mod-id>/mod.json
 ```
 
 这里的 `version` 是单个 Mod 包自己的版本号，不是 Runtime 插件版本；当前 Runtime
-发布版本为 `0.2.0`。
+发布版本为 `0.3.0`。
 
 ## 字段
 
@@ -132,11 +132,12 @@ API 切换成功时先更新当前会话有效 replacement map，再原子写回
 - 首次应用时保存原 Mesh、材质、骨骼、根骨和每材质 `MaterialPropertyBlock`；
 - OFF 时恢复当前场景实例与缓存 Prefab；
 - ON 时对目标资源子树重应用并刷新活动 Animation Rig；
-- Mod 贴图写入 Runtime 创建的私有材质；已有 `MaterialPropertyBlock` 只作为兼容性快照保留，
-  不是当前游戏场景中的贴图写入者。实机探针确认这些场景从不调用 `Renderer.SetPropertyBlock`；
-- Runtime 保留 `Renderer.set_sharedMaterials` / `set_materials` 的诊断与恢复路径；游戏当前
-  实际使用的底层材质数组写回仍可能让主页颜色在热 ON 后暂时错误，进入一次换装页面会重新走完整
-  替换路径并恢复。IDA 后的底层 icall 实验钩子已因崩溃撤回。
+- 冷路径（资源加载时）的 Mod 贴图写入 Runtime 创建的私有材质；活体热路径直接写游戏自己的
+  per-actor 材质，写前快照原贴图，OFF 时先注销 override 再写回；
+- 已有 `MaterialPropertyBlock` 只作为兼容性快照保留，不是贴图写入者。实机探针确认这些场景
+  从不调用 `Renderer.SetPropertyBlock`；
+- `Renderer.set_sharedMaterials` / `set_materials` 的钩子只作诊断保留。「游戏写回材质数组
+  导致热 ON 颜色错」这条归因已被抓帧证伪，真因是换空间时漏搬法线/切线，已修复。
 
 整对象替换和附加式规则暂不保证即时逆转；它们可能需要重新选择资源、重进场景或重启。
 热开关改变的是 Manifest 状态与 Runtime 会话，不会把 AssetBundle 改成启动时全部预加载；

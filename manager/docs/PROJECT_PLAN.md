@@ -1,6 +1,6 @@
 # Gakumas 游戏内 Mod 管理器：当前产品与发布计划
 
-> 最后更新：2026-08-05
+> 最后更新：2026-08-09
 > 本文只描述当前架构和仍有效的发布计划。已证伪结论和已撤回路线统一记录在
 > `../../docs/lessons-learned.md`，不得再作为实现依据。
 
@@ -65,12 +65,18 @@ Manifest 写回逻辑。
 
 ## 5. 材质热开关的正确结论
 
-Runtime 会保存已有 `MaterialPropertyBlock` 以便兼容和恢复，但它不是当前颜色问题的写入者。
-实机探针确认目标场景不调用 `Renderer.SetPropertyBlock` 或 `Material.SetTexture` 覆盖 Mod 贴图。
+「热 ON 后颜色错」跟材质写入者无关，2026-08-09 已定案：真因是网格换空间时只搬了顶点、
+没搬法线和切线。冷路径两端都是 prefab 单位阵所以看不出来，活体角色有真实旋转就会让法线
+和几何脱节。修复后热 ON 直接回主页颜色即正确。
 
-已观测到的真实写入者是游戏在热重应用之后调用 `Renderer.set_sharedMaterials` /
-`set_materials`，最终进入材质数组写回。当前安全基线是：热 OFF/ON 生效且不崩溃；热 ON 后
-直接回主页可能短暂显示原版颜色，进入一次换装页面会恢复。底层 icall 实验 Hook 已撤回。
+同时作废的两条结论：`MaterialPropertyBlock` 覆盖（探针确认游戏从不调用
+`SetPropertyBlock`），以及「游戏事后写回材质数组」（抓帧确认暗色帧和正常帧的身体 draw
+逐字节相同）。底层 icall 实验 Hook 已撤回。详见
+[`../../docs/lessons-learned.md`](../../docs/lessons-learned.md)。
+
+活体路径现在直接把 Mod 贴图写进游戏自己的 per-actor 材质，不再克隆私有材质、不再灌
+PropertyBlock；OFF 时先注销 override 再写回快照的原贴图（`Material.SetTexture` 的 Hook
+会拦截还原写入）。
 
 ## 6. 发布验收矩阵
 
@@ -87,18 +93,18 @@ Runtime 会保存已有 `MaterialPropertyBlock` 以便兼容和恢复，但它�
 1. 启动、退出、重启，确认单 DLL 加载和 Manifest 状态保持；
 2. 重复打开菜单，确认只有一个“Mod 管理”入口；
 3. Mod→设置→菜单、设置→Mod、Mod→Mod，确认不叠页且 Reload 后入口可重建；
-4. 标准服装 ON/OFF/ON，每次进入一次换装页面并记录 Mesh、材质、骨骼和颜色；
+4. 标准服装 ON/OFF/ON，直接回主页记录 Mesh、材质、骨骼和颜色（不再需要进换装页面）；
 5. hair + hairprop 双 Renderer 开关和发型预览；
 6. 启动冲突组全关、运行中新项冲突拒绝；
 7. 缺 bundle、损坏 Manifest、只读文件等安全降级；
 8. 返回主页、重登、不同分辨率和长期重复打开。
 
-已知颜色限制可以作为明确记录的已知问题发布，但不得再宣称 PropertyBlock 是原因或宣称即时
-颜色恢复已经解决。
+颜色问题已解决，不得再把 PropertyBlock 或材质数组写回写成原因。仍需作为已知问题记录的是
+无摆动声明的骨被挂 swing 组件导致的 `RegisterBones` 异常（见下）和冷路径克隆的累积。
 
 ## 7. 发布后优先级
 
-1. 找到材质数组写回之后的稳定、安全恢复时点，解决热 ON 直接回主页的颜色问题；
+1. 只给声明了摆动参数的骨挂 `ActorSwingDynamicBone`，替掉 `RegisterRigBonesGuarded` 的 SEH 兜底；
 2. 完成发型官方预览和完整生命周期矩阵；
 3. 完善 `appliedThisSession`、并发审计和离线 bundle asset-path 校验；
 4. 为整对象替换与附加式规则提供受控重载或清晰的重新加载提示。

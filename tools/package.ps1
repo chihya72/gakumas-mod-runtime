@@ -2,7 +2,7 @@
 # you -- a release must be reproducible without a runner.
 #
 #   .\tools\package.ps1                 # dist\gakumas-mod-runtime-dev.zip
-#   .\tools\package.ps1 -Version v0.2.0
+#   .\tools\package.ps1 -Version v0.3.0
 #   .\tools\package.ps1 -SkipBuild      # package whatever is already built
 #
 # The zip mirrors the game directory, so it extracts straight into the game root:

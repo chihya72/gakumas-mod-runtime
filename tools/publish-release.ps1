@@ -1,7 +1,7 @@
 # Create a Gitea release and attach the packaged zip.
 #
 #   $env:GITEA_TOKEN = "<token>"
-#   .\tools\publish-release.ps1 -Tag v0.2.0 -Zip dist\gakumas-mod-runtime-0.2.0.zip
+#   .\tools\publish-release.ps1 -Tag v0.3.0 -Zip dist\gakumas-mod-runtime-0.3.0.zip
 #
 # The release workflow calls this with the token Gitea injects.  Kept out of the
 # YAML on purpose: quoting a JSON body and a multipart upload through YAML ->
