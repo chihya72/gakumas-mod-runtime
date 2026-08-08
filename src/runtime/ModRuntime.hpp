@@ -6,4 +6,7 @@ namespace GakumasMod::Runtime {
     bool Initialize();
     void Shutdown();
     GmrResult SetSessionModEnabled(const char* modIdUtf8, uint8_t enabled);
+    // Logs what is currently attached to every patched renderer.  Info level,
+    // main thread only.
+    void AuditLivePatches(const char* reason);
 }

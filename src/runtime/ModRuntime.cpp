@@ -120,6 +120,11 @@ namespace GakumasMod::Runtime {
             int propertyId{};
             std::string propertyName;
             void* texture{};
+            // What the property held before the Mod wrote over it.  Only the
+            // live-instance path needs it: there the write lands on a material
+            // the game owns, so turning the Mod off has to put the original
+            // texture back rather than swap the material out.
+            void* previousTexture{};
         };
 
         struct RendererSlotTextureOverrides {
@@ -292,7 +297,13 @@ namespace GakumasMod::Runtime {
         // 5 layers -> 3 when depth-3 bow roots join), which both kills the skirt's lower layers
         // and flails the bows on a solver that isn't theirs.
         std::unordered_set<void*> g_createdHostChains{};
-        std::vector<Il2CppGCHandle> g_runtimeMeshHandles{};
+        // Keyed by clone so a hot OFF can drop the one it just detached.  Every
+        // hot ON clones the Mod mesh again (~16 MB for a 170k-vertex body), and
+        // a pinned handle the runtime never releases turned each toggle into a
+        // permanent leak.  Asset loads run off the main thread, so this needs
+        // its own lock.
+        std::mutex g_runtimeMeshHandleMutex;
+        std::unordered_map<void*, Il2CppGCHandle> g_runtimeMeshHandles{};
         std::vector<Il2CppGCHandle> g_runtimeBoneHandles{};
         std::vector<Il2CppGCHandle> g_runtimeMaterialHandles{};
         std::unordered_map<void*, std::vector<void*>> g_hybridBonesByRenderer{};
@@ -1643,7 +1654,11 @@ namespace GakumasMod::Runtime {
                 return nullptr;
             }
 
-            g_runtimeMeshHandles.emplace_back(UnityResolve::Invoke<Il2CppGCHandle>("il2cpp_gchandle_new", clone, false));
+            {
+                std::lock_guard lock(g_runtimeMeshHandleMutex);
+                g_runtimeMeshHandles[clone] =
+                    UnityResolve::Invoke<Il2CppGCHandle>("il2cpp_gchandle_new", clone, false);
+            }
             Log::InfoFmt("[ModAsset] Cloned mod mesh before patch: %s renderer=%zu sourceMesh=%p clonedMesh=%p",
                 sourceName.c_str(),
                 rendererIndex,
@@ -1833,6 +1848,54 @@ namespace GakumasMod::Runtime {
                 ->Get("Transform")
                 ->Get<UnityResolve::Method>("TransformPoint");
             return transform && method ? method->Invoke<UnityResolve::UnityType::Vector3>(transform, position) : UnityResolve::UnityType::Vector3{};
+        }
+
+        UnityResolve::UnityType::Vector3 InverseTransformDirection(
+            void* transform, const UnityResolve::UnityType::Vector3& direction) {
+            static auto method = UnityResolve::Get("UnityEngine.CoreModule.dll")
+                ->Get("Transform")
+                ->Get<UnityResolve::Method>("InverseTransformDirection");
+            return transform && method
+                ? method->Invoke<UnityResolve::UnityType::Vector3>(transform, direction)
+                : UnityResolve::UnityType::Vector3{};
+        }
+
+        UnityResolve::UnityType::Vector3 TransformDirection(
+            void* transform, const UnityResolve::UnityType::Vector3& direction) {
+            static auto method = UnityResolve::Get("UnityEngine.CoreModule.dll")
+                ->Get("Transform")
+                ->Get<UnityResolve::Method>("TransformDirection");
+            return transform && method
+                ? method->Invoke<UnityResolve::UnityType::Vector3>(transform, direction)
+                : UnityResolve::UnityType::Vector3{};
+        }
+
+        UnityArray<UnityResolve::UnityType::Vector3>* GetMeshNormals(void* mesh) {
+            static auto fn = reinterpret_cast<UnityArray<UnityResolve::UnityType::Vector3>* (*)(void*)>(
+                Il2cppUtils::GetMethodPointer(
+                    "UnityEngine.CoreModule.dll", "UnityEngine", "Mesh", "get_normals"));
+            return mesh && fn ? fn(mesh) : nullptr;
+        }
+
+        void SetMeshNormals(void* mesh, UnityArray<UnityResolve::UnityType::Vector3>* normals) {
+            static auto fn = reinterpret_cast<void (*)(void*, UnityArray<UnityResolve::UnityType::Vector3>*)>(
+                Il2cppUtils::GetMethodPointer(
+                    "UnityEngine.CoreModule.dll", "UnityEngine", "Mesh", "set_normals"));
+            if (mesh && normals && fn) fn(mesh, normals);
+        }
+
+        UnityArray<UnityResolve::UnityType::Vector4>* GetMeshTangents(void* mesh) {
+            static auto fn = reinterpret_cast<UnityArray<UnityResolve::UnityType::Vector4>* (*)(void*)>(
+                Il2cppUtils::GetMethodPointer(
+                    "UnityEngine.CoreModule.dll", "UnityEngine", "Mesh", "get_tangents"));
+            return mesh && fn ? fn(mesh) : nullptr;
+        }
+
+        void SetMeshTangents(void* mesh, UnityArray<UnityResolve::UnityType::Vector4>* tangents) {
+            static auto fn = reinterpret_cast<void (*)(void*, UnityArray<UnityResolve::UnityType::Vector4>*)>(
+                Il2cppUtils::GetMethodPointer(
+                    "UnityEngine.CoreModule.dll", "UnityEngine", "Mesh", "set_tangents"));
+            if (mesh && tangents && fn) fn(mesh, tangents);
         }
 
         UnityResolve::UnityType::Matrix4x4 GetTransformLocalToWorldMatrix(void* transform) {
@@ -2378,13 +2441,49 @@ namespace GakumasMod::Runtime {
                 vertices->At(static_cast<unsigned int>(i)) = InverseTransformPoint(originalTransform, world);
             }
 
+            // Normals and tangents live in the same space as the positions, so
+            // they have to make the same trip.  On the cold path the two
+            // transforms are both prefab-identity and skipping this is
+            // invisible; on a live actor the rotation is real, and leaving the
+            // normals behind is what rendered a hot-applied costume dark
+            // (frame analysis, 2026-08-09: face-normal agreement +0.97 on the
+            // cold path, -0.23 on the hot path, with identical textures).
+            size_t normalCount = 0;
+            if (const auto normals = GetMeshNormals(modMesh)) {
+                for (std::uintptr_t i = 0; i < normals->max_length; ++i) {
+                    const auto world = TransformDirection(
+                        modTransform, normals->At(static_cast<unsigned int>(i)));
+                    normals->At(static_cast<unsigned int>(i)) =
+                        InverseTransformDirection(originalTransform, world);
+                }
+                SetMeshNormals(modMesh, normals);
+                normalCount = static_cast<size_t>(normals->max_length);
+            }
+
+            size_t tangentCount = 0;
+            if (const auto tangents = GetMeshTangents(modMesh)) {
+                for (std::uintptr_t i = 0; i < tangents->max_length; ++i) {
+                    auto& tangent = tangents->At(static_cast<unsigned int>(i));
+                    const UnityResolve::UnityType::Vector3 direction{
+                        tangent.x, tangent.y, tangent.z };
+                    const auto world = TransformDirection(modTransform, direction);
+                    const auto local = InverseTransformDirection(originalTransform, world);
+                    // w carries the bitangent sign, not a coordinate.
+                    tangent = { local.x, local.y, local.z, tangent.w };
+                }
+                SetMeshTangents(modMesh, tangents);
+                tangentCount = static_cast<size_t>(tangents->max_length);
+            }
+
             SetMeshVertices(modMesh, vertices);
             RecalculateMeshBounds(modMesh);
             g_transformedMeshSet.emplace(modMesh);
-            Log::InfoFmt("[ModAsset] Transformed mod mesh vertices to original renderer space: %s renderer=%zu vertices=%zu originalRenderer=\"%s\" modRenderer=\"%s\"",
+            Log::InfoFmt("[ModAsset] Transformed mod mesh vertices to original renderer space: %s renderer=%zu vertices=%zu normals=%zu tangents=%zu originalRenderer=\"%s\" modRenderer=\"%s\"",
                 sourceName.c_str(),
                 rendererIndex,
                 static_cast<size_t>(vertices->max_length),
+                normalCount,
+                tangentCount,
                 GetUnityObjectNameString(originalRenderer).c_str(),
                 GetUnityObjectNameString(modRenderer).c_str());
             return true;
@@ -2791,8 +2890,80 @@ namespace GakumasMod::Runtime {
             return true;
         }
 
+        // Shader name, keywords and every scalar the shader declares.  Colours
+        // and vectors are left out on purpose: their 16-byte return would need
+        // the hidden-pointer ABI, and a stale-derived-state difference shows up
+        // in a keyword or a scalar first.
+        std::string DescribeMaterialState(void* material) {
+            if (!material) return {};
+            static auto Material_get_shader = reinterpret_cast<void* (*)(void*)>(
+                Il2cppUtils::GetMethodPointer(
+                    "UnityEngine.CoreModule.dll", "UnityEngine", "Material", "get_shader"));
+            static auto Material_get_shaderKeywords =
+                reinterpret_cast<UnityArray<Il2cppString*>* (*)(void*)>(
+                    Il2cppUtils::GetMethodPointer("UnityEngine.CoreModule.dll", "UnityEngine",
+                        "Material", "get_shaderKeywords"));
+            static auto Material_GetFloat = reinterpret_cast<float (*)(void*, int)>(
+                Il2cppUtils::GetMethodPointer("UnityEngine.CoreModule.dll", "UnityEngine",
+                    "Material", "GetFloat", { "System.Int32" }));
+            static auto Shader_GetPropertyCount = reinterpret_cast<int (*)(void*)>(
+                Il2cppUtils::GetMethodPointer(
+                    "UnityEngine.CoreModule.dll", "UnityEngine", "Shader", "GetPropertyCount"));
+            static auto Shader_GetPropertyName = reinterpret_cast<Il2cppString* (*)(void*, int)>(
+                Il2cppUtils::GetMethodPointer("UnityEngine.CoreModule.dll", "UnityEngine",
+                    "Shader", "GetPropertyName", { "System.Int32" }));
+            static auto Shader_GetPropertyType = reinterpret_cast<int (*)(void*, int)>(
+                Il2cppUtils::GetMethodPointer("UnityEngine.CoreModule.dll", "UnityEngine",
+                    "Shader", "GetPropertyType", { "System.Int32" }));
+
+            std::string result;
+            if (Material_get_shaderKeywords) {
+                if (const auto keywords = Material_get_shaderKeywords(material)) {
+                    result += " keywords=[";
+                    for (std::uintptr_t i = 0; i < keywords->max_length; ++i) {
+                        if (const auto keyword = keywords->At(static_cast<unsigned int>(i))) {
+                            if (i) result += ",";
+                            result += keyword->ToString();
+                        }
+                    }
+                    result += "]";
+                }
+            }
+            const auto shader = Material_get_shader ? Material_get_shader(material) : nullptr;
+            if (!shader || !Shader_GetPropertyCount || !Shader_GetPropertyName
+                || !Shader_GetPropertyType || !Material_GetFloat) {
+                return result;
+            }
+            result += " floats=[";
+            bool first = true;
+            const auto count = Shader_GetPropertyCount(shader);
+            for (int i = 0; i < count; ++i) {
+                // ShaderPropertyType: 0 Color, 1 Vector, 2 Float, 3 Range, 4 Texture.
+                const auto type = Shader_GetPropertyType(shader, i);
+                if (type != 2 && type != 3) continue;
+                const auto name = Shader_GetPropertyName(shader, i);
+                if (!name) continue;
+                const auto propertyName = name->ToString();
+                if (!first) result += ",";
+                first = false;
+                result += Log::Format("%s=%.4f", propertyName.c_str(),
+                    Material_GetFloat(material, GetShaderPropertyId(propertyName)));
+            }
+            result += "]";
+            return result;
+        }
+
+        void* GetMaterialTexture(void* material, const int propertyId) {
+            static auto method = Il2cppUtils::GetMethod(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "Material", "GetTexture",
+                { "System.Int32" });
+            if (!material || propertyId < 0 || !method || !method->function) return nullptr;
+            using Fn = void* (*)(void*, int, void*);
+            return reinterpret_cast<Fn>(method->function)(material, propertyId, method->address);
+        }
+
         void RegisterPersistentMaterialTextureOverride(void* material, const int propertyId,
-            const std::string& propertyName, void* texture) {
+            const std::string& propertyName, void* texture, void* previousTexture) {
             if (!material || propertyId < 0 || !texture) return;
             std::lock_guard lock(g_materialOverrideMutex);
             auto& overrides = g_materialTextureOverrides[material];
@@ -2801,12 +2972,23 @@ namespace GakumasMod::Runtime {
                 iter != overrides.end()) {
                 iter->propertyName = propertyName;
                 iter->texture = texture;
+                // Keep the first snapshot: the second write would record our own
+                // texture as the thing to restore.
             }
             else {
+                if (previousTexture) {
+                    // Nothing else may reference it once the material stops doing
+                    // so, and a restore into a collected texture is a native crash.
+                    if (const auto handle = UnityResolve::Invoke<Il2CppGCHandle>(
+                            "il2cpp_gchandle_new", previousTexture, false)) {
+                        g_runtimeMaterialHandles.emplace_back(handle);
+                    }
+                }
                 overrides.emplace_back(PersistentMaterialTextureOverride{
                     propertyId,
                     propertyName,
                     texture,
+                    previousTexture,
                 });
             }
             g_rendererTextureOverrideCache.clear();
@@ -2954,6 +3136,7 @@ namespace GakumasMod::Runtime {
                 const auto material = materials->At(static_cast<unsigned int>(textureReplacement.materialSlot));
                 if (!material) continue;
                 const auto propertyId = GetShaderPropertyId(textureReplacement.propertyName);
+                const auto previousTexture = GetMaterialTexture(material, propertyId);
                 if (!SetMaterialTexture(material, propertyId, textureAsset)) {
                     Log::ErrorFmt("[ModAsset] Material.SetTexture failed: %s renderer=%zu slot=%d property=%s",
                         replacement.sourceName.c_str(),
@@ -2963,7 +3146,8 @@ namespace GakumasMod::Runtime {
                     continue;
                 }
                 RegisterPersistentMaterialTextureOverride(
-                    material, propertyId, textureReplacement.propertyName, textureAsset);
+                    material, propertyId, textureReplacement.propertyName, textureAsset,
+                    previousTexture);
                 ++applied;
                 Log::InfoFmt("[ModAsset] Applied material texture: %s renderer=%zu rendererName=\"%s\" slot=%d property=%s texture=%s result=%p",
                     replacement.sourceName.c_str(),
@@ -3419,6 +3603,90 @@ namespace GakumasMod::Runtime {
             g_loggedPersistentRenderers.erase(renderer);
         }
 
+        void ReleaseRuntimeMeshClone(void* mesh) {
+            if (!mesh) return;
+            Il2CppGCHandle handle{};
+            {
+                std::lock_guard lock(g_runtimeMeshHandleMutex);
+                const auto iter = g_runtimeMeshHandles.find(mesh);
+                // Not ours: only clones this runtime made are destroyed here.
+                if (iter == g_runtimeMeshHandles.end()) return;
+                handle = iter->second;
+                g_runtimeMeshHandles.erase(iter);
+            }
+            if (handle) UnityResolve::Invoke<void>("il2cpp_gchandle_free", handle);
+            g_transformedMeshSet.erase(mesh);
+
+            // Freeing the handle only lets the managed wrapper go.  A Mesh is a
+            // native Unity object: its vertex/skin arrays stay allocated until
+            // something destroys it, which is why releasing the handle alone
+            // left memory climbing one ~16 MB clone per toggle.
+            static auto Object_Destroy = reinterpret_cast<void (*)(void*)>(
+                Il2cppUtils::GetMethodPointer("UnityEngine.CoreModule.dll", "UnityEngine",
+                    "Object", "Destroy", { "UnityEngine.Object" }));
+            if (Object_Destroy) Object_Destroy(mesh);
+            Log::InfoFmt("[ModAsset] Released hot-applied mesh clone: mesh=%p destroyed=%d",
+                mesh, Object_Destroy ? 1 : 0);
+        }
+
+        // Put the vanilla textures back on whatever materials the renderer is
+        // carrying now, without swapping the array.  A live actor's materials
+        // are per-actor copies the game keeps writing to; replacing them with
+        // the prefab's shared originals leaves the actor stripped of that state
+        // and poisons the next hot ON.
+        //
+        // Two sources for "vanilla": the live path snapshots the texture it
+        // overwrote, while the cold path never touched the original material,
+        // so its untouched copy still holds the answer.
+        void RestoreModTexturesOnRenderer(
+            void* renderer,
+            const ReversibleRendererPatch& patch) {
+            const auto materials = reinterpret_cast<UnityArray<void*>*>(
+                GetRendererSharedMaterials(renderer));
+            if (!materials) return;
+            for (std::uintptr_t i = 0; i < materials->max_length; ++i) {
+                const auto live = materials->At(static_cast<unsigned int>(i));
+                if (!live) continue;
+                // The overrides were registered on whatever we patched, which is
+                // the private clone on the cold path and the live material here.
+                const auto patched = i < patch.patchedMaterials.size()
+                    ? patch.patchedMaterials[i]
+                    : live;
+                const auto original = i < patch.originalMaterials.size()
+                    ? patch.originalMaterials[i]
+                    : nullptr;
+
+                const auto entries = GetRegisteredMaterialTextureOverrides(patched);
+                if (entries.empty()) continue;
+                // Drop the registration first.  Material.SetTexture is hooked and
+                // substitutes the registered Mod texture for whatever the caller
+                // passes, so restoring while still registered writes the Mod
+                // texture straight back -- the write "succeeds" and the log says
+                // so, but nothing changes.
+                {
+                    std::lock_guard lock(g_materialOverrideMutex);
+                    g_materialTextureOverrides.erase(patched);
+                    g_materialTextureOverrides.erase(live);
+                    g_rendererTextureOverrideCache.erase(renderer);
+                }
+
+                size_t restored = 0;
+                for (const auto& entry : entries) {
+                    const auto vanilla = entry.previousTexture
+                        ? entry.previousTexture
+                        : (original && original != patched
+                            ? GetMaterialTexture(original, entry.propertyId)
+                            : nullptr);
+                    if (vanilla && SetMaterialTexture(live, entry.propertyId, vanilla)) {
+                        ++restored;
+                    }
+                }
+                Log::InfoFmt(
+                    "[ModAsset] Restored original textures: renderer=%p slot=%u material=%p properties=%zu/%zu",
+                    renderer, static_cast<unsigned>(i), live, restored, entries.size());
+            }
+        }
+
         size_t RestoreLiveModInstances(const std::string& modId) {
             std::vector<ReversibleRendererPatch> patches;
             {
@@ -3441,8 +3709,10 @@ namespace GakumasMod::Runtime {
             // can disappear as soon as the current view changes.
             {
                 std::lock_guard lock(g_reversiblePatchMutex);
+                // Merged, not replaced: the load-time identities cover sources
+                // this OFF had no live patch for, and the dedupe below keeps the
+                // list from growing.
                 auto& identities = g_reapplyRendererIdentities[modId];
-                identities.clear();
                 for (const auto& patch : patches) {
                     if (!patch.originalMesh) continue;
                     const ReapplyRendererIdentity identity{
@@ -3532,10 +3802,23 @@ namespace GakumasMod::Runtime {
                 else {
                     SetSkinnedMeshRendererRootBone(renderer, nullptr);
                 }
-                SetRendererSharedMaterials(renderer, restoredMaterials);
+                // Only the renderer we actually handed a different array to gets
+                // it back.  A cold-path patch is registered on the loaded
+                // prefab; pushing its array onto a live instance would replace
+                // the per-actor material copies the game maintains with the
+                // pristine asset materials.
+                if (renderer == patch->patchedRenderer
+                    && !patch->patchedMaterialKeys.empty()) {
+                    SetRendererSharedMaterials(renderer, restoredMaterials);
+                }
+                RestoreModTexturesOnRenderer(renderer, *patch);
                 SetSkinnedMeshRendererSharedMesh(renderer, patch->originalMesh);
                 ClearRuntimePropertyBlocks(renderer, patch->originalMaterials.size());
                 RefreshSkinnedMeshRendererState(renderer);
+                // The renderer is back on its original mesh, so let the clone
+                // this patch installed go.  The next ON clones a fresh one; a
+                // handle kept here is ~16 MB of Mod mesh leaked per toggle.
+                ReleaseRuntimeMeshClone(patch->patchedMesh);
 
                 ++restoredCount;
                 Log::InfoFmt(
@@ -3550,7 +3833,14 @@ namespace GakumasMod::Runtime {
         }
 
         bool ApplySkinnedMeshReplacement(void* originalGameObject, void* modGameObject,
-            const LocalModAssetReplacement& replacement) {
+            const LocalModAssetReplacement& replacement,
+            // A live actor's renderer carries per-actor material copies that the
+            // game keeps writing to (lighting, decals, campus material setup).
+            // Cloning those and installing the clone orphans the renderer from
+            // every later write, which is what rendered a hot-applied costume
+            // dark until a costume-page visit rebuilt the actor.  On a live
+            // instance the Mod textures go straight onto the game's materials.
+            const bool liveInstance = false) {
             if (!originalGameObject || !modGameObject) return false;
             const auto& sourceName = replacement.sourceName;
 
@@ -3650,6 +3940,7 @@ namespace GakumasMod::Runtime {
                     ? modMaterials
                     : originalMaterials;
                 if (!replacement.replaceMaterials
+                    && !liveInstance
                     && (!replacement.materialCopies.empty()
                         || !replacement.materialTextures.empty()
                         || !replacement.materialColors.empty()
@@ -3667,11 +3958,14 @@ namespace GakumasMod::Runtime {
                     rendererMaterialApplied = true;
                     ++textureApplied;
                 }
-                // Commit persistent texture overrides immediately.  The game's
-                // later SetMaterialArray/Renderer.set_sharedMaterials call is
-                // handled by the material-assignment hook below and will restore
-                // this complete Mod material array after its write.
-                ApplyPersistentTextureOverrides(pair.originalRenderer);
+                // Property blocks only exist here to force our textures past a
+                // block the game was believed to own -- a theory since
+                // disproven.  On a live instance the textures are already on the
+                // game's own material, so the block adds nothing and its
+                // per-slot SetPropertyBlock is what rendered the hot-applied
+                // costume dark (OFF cleared the blocks and the same materials
+                // with the same Mod textures went back to normal).
+                if (!liveInstance) ApplyPersistentTextureOverrides(pair.originalRenderer);
                 if (rendererMaterialApplied) ++materialApplied;
                 if (SkinnedMeshRenderer_set_updateWhenOffscreen) {
                     SkinnedMeshRenderer_set_updateWhenOffscreen(pair.originalRenderer, true);
@@ -3762,6 +4056,31 @@ namespace GakumasMod::Runtime {
             return true;
         }
 
+        // 2026-08-09, Player.log: the game's RegisterBones throws
+        // ArgumentOutOfRangeException when a live actor gained swing bones this
+        // way.  The managed exception unwinds straight through these native
+        // frames, so the toggle used to be abandoned mid-flight -- no renderer
+        // reactivation, no persistence, and a catalog that disagreed with the
+        // runtime on the next click (the second toggle then reported
+        // changed=0 hotInstances=0 while the Mod was in fact applied).
+        // ponytail: SEH, because this project builds without C++ exceptions.
+        // Containing it is not a fix for the throw itself -- a bundle whose
+        // swing chains have no tip bone still leaves them unregistered.
+        bool RegisterRigBonesGuarded(void* rig, void* initializeData) {
+            __try {
+                CampusActorAnimationRig_RegisterBones_Orig(rig, initializeData);
+                return true;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) {
+                return false;
+            }
+        }
+
+        // Do not call CampusActorModelParts.InitializeCampusMaterials() on a
+        // live actor to refresh derived material state.  2026-08-09: it replaced
+        // the renderer's whole material array with materials whose shader has
+        // zero properties (audit printed keywords=[] floats=[]), which killed
+        // both the Mod and every later toggle.
         size_t RefreshAnimationRigsAfterHotReapply(
             const std::vector<void*>& targets) {
             std::vector<ActiveAnimationRigContext> contexts;
@@ -3792,9 +4111,13 @@ namespace GakumasMod::Runtime {
                     context.rootTransform, context.initializeData);
                 const auto addedChains = AddActorSwingChainsToAnimationData(
                     context.rootTransform, context.initializeData);
-                if (addedBones > 0 || addedChains > 0) {
-                    CampusActorAnimationRig_RegisterBones_Orig(
-                        context.rig, context.initializeData);
+                if ((addedBones > 0 || addedChains > 0)
+                    && !RegisterRigBonesGuarded(context.rig, context.initializeData)) {
+                    Log::ErrorFmt(
+                        "[ModAsset] CampusActorAnimationRig.RegisterBones threw during hot reapply; swing bones stay unregistered: root=%s addedBones=%zu addedChains=%zu",
+                        GetUnityObjectNameString(context.rootGameObject).c_str(),
+                        addedBones,
+                        addedChains);
                 }
 
                 size_t reactivatedTargets = 0;
@@ -3876,7 +4199,7 @@ namespace GakumasMod::Runtime {
 
             size_t applied = 0;
             for (const auto target : targets) {
-                if (ApplySkinnedMeshReplacement(target, modAsset, replacement)) ++applied;
+                if (ApplySkinnedMeshReplacement(target, modAsset, replacement, true)) ++applied;
             }
             for (const auto target : targets) {
                 Log::InfoFmt("[ModAsset] Hot reapply target: object=%p name=\"%s\"",
@@ -3894,7 +4217,81 @@ namespace GakumasMod::Runtime {
             return applied;
         }
 
+        // A Mod that was off when the game started has never been applied, so the
+        // reversible registry is empty -- and until now the only writer of the
+        // reapply identities was a preceding OFF.  Turning such a Mod on logged
+        // "hotInstances=0" and changed nothing on screen; only a costume-page
+        // visit, which reloads the asset, made it appear.  The identity a hot ON
+        // needs is just the source asset's original renderer name and mesh, and
+        // every load walks past that whether the Mod is enabled or not.
+        void RememberSourceRendererIdentities(void* originalAsset, const std::string& sourceName) {
+            if (!originalAsset
+                || std::strcmp(GetUnityObjectClassName(originalAsset), "GameObject") != 0) {
+                return;
+            }
+
+            std::vector<LocalModAssetReplacementPtr> candidates;
+            {
+                std::shared_lock replacementLock(g_replacementMutex);
+                for (const auto& replacement : g_registeredReplacements) {
+                    if (!replacement
+                        || replacement->replaceWholeObject
+                        || replacement->attachToOriginal) {
+                        continue;
+                    }
+                    if (NormalizeAssetName(replacement->sourceName)
+                        != NormalizeAssetName(sourceName)) {
+                        continue;
+                    }
+                    candidates.push_back(replacement);
+                }
+            }
+            if (candidates.empty()) return;
+
+            const auto rendererClass = Il2cppUtils::GetClass(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "SkinnedMeshRenderer");
+            if (!rendererClass) return;
+            const auto renderers = reinterpret_cast<UnityResolve::UnityType::GameObject*>(
+                originalAsset)->GetComponentsInChildren<void*>(rendererClass, true);
+            if (renderers.empty()) return;
+
+            std::lock_guard lock(g_reversiblePatchMutex);
+            for (const auto& replacement : candidates) {
+                auto& identities = g_reapplyRendererIdentities[replacement->modId];
+                for (const auto renderer : renderers) {
+                    const auto mesh = GetSkinnedMeshRendererSharedMesh(renderer);
+                    if (!mesh) continue;
+                    const ReapplyRendererIdentity identity{
+                        replacement->sourceName,
+                        mesh,
+                        GetComponentDepthFromRoot(renderer, originalAsset),
+                        GetUnityObjectNameString(renderer),
+                    };
+                    // Only the first load sees the untouched prefab: once this
+                    // runtime has patched it in place, its mesh is the Mod's.
+                    const auto duplicate = std::find_if(
+                        identities.begin(),
+                        identities.end(),
+                        [&identity](const auto& existing) {
+                            return existing.sourceName == identity.sourceName
+                                && existing.rendererName == identity.rendererName;
+                        });
+                    if (duplicate != identities.end()) continue;
+                    identities.push_back(identity);
+                    Log::InfoFmt(
+                        "[ModAsset] Remembered hot-reapply identity: mod=%s source=%s renderer=\"%s\" mesh=%p depth=%d",
+                        replacement->modId.c_str(),
+                        identity.sourceName.c_str(),
+                        identity.rendererName.c_str(),
+                        identity.originalMesh,
+                        identity.sourceRootDepth);
+                }
+            }
+        }
+
         void* ReplaceLocalModAssetIfNeeded(void* originalResult, const std::string& sourceName) {
+            RememberSourceRendererIdentities(originalResult, sourceName);
+
             const auto replacement = FindLocalModAssetReplacement(sourceName);
             if (!replacement) return originalResult;
 
@@ -4707,6 +5104,103 @@ namespace GakumasMod::Runtime {
                 ok = false;
             }
             return ok;
+        }
+    }
+
+    // Diagnostic only.  Five rounds of fixes guessed at what replaces the Mod
+    // colours between "hot ON" and "back on the home screen"; none of them ever
+    // established what is actually attached to the renderer drawing the body at
+    // that moment.  This reads it back: which live renderer carries the patched
+    // mesh, whether its material array is still ours, and whether the textures
+    // we wrote are still bound.  Main thread only -- called from the mod menu.
+    void AuditLivePatches(const char* reason) {
+        if (!Log::IsEnabled(Log::Level::Info)) return;
+        const auto label = reason && *reason ? reason : "audit";
+
+        std::vector<ReversibleRendererPatch> patches;
+        {
+            std::lock_guard lock(g_reversiblePatchMutex);
+            patches = g_reversibleRendererPatches;
+        }
+        if (patches.empty()) {
+            Log::InfoFmt("[ModAudit] %s: no registered renderer patches.", label);
+            return;
+        }
+
+        const auto rendererClass = Il2cppUtils::GetClass(
+            "UnityEngine.CoreModule.dll", "UnityEngine", "SkinnedMeshRenderer");
+        if (!rendererClass) return;
+        const auto liveRenderers = rendererClass->FindObjectsByType<void*>();
+
+        for (const auto& patch : patches) {
+            size_t withPatchedMesh = 0;
+            size_t withOriginalMesh = 0;
+            for (const auto renderer : liveRenderers) {
+                if (!renderer || !IsNativeObjectAlive(renderer)) continue;
+                const auto mesh = GetSkinnedMeshRendererSharedMesh(renderer);
+                const bool patchedMesh = patch.patchedMesh && mesh == patch.patchedMesh;
+                const bool originalMesh = patch.originalMesh && mesh == patch.originalMesh;
+                if (patchedMesh) ++withPatchedMesh;
+                if (originalMesh) ++withOriginalMesh;
+                if (!patchedMesh && !originalMesh && renderer != patch.patchedRenderer) continue;
+
+                std::string slots;
+                const auto materials = reinterpret_cast<UnityArray<void*>*>(
+                    GetRendererSharedMaterials(renderer));
+                for (std::uintptr_t i = 0; materials && i < materials->max_length; ++i) {
+                    const auto material = materials->At(static_cast<unsigned int>(i));
+                    const bool isModSlot = i < patch.patchedMaterials.size()
+                        && material == patch.patchedMaterials[i];
+                    const bool isOriginalSlot = i < patch.originalMaterials.size()
+                        && material == patch.originalMaterials[i];
+                    bool isPrivate = false;
+                    {
+                        std::lock_guard lock(g_materialOverrideMutex);
+                        isPrivate = g_privateMaterials.contains(material);
+                    }
+                    size_t overrides = 0;
+                    size_t boundTextures = 0;
+                    for (const auto& entry : GetRegisteredMaterialTextureOverrides(material)) {
+                        ++overrides;
+                        if (GetMaterialTexture(material, entry.propertyId) == entry.texture) {
+                            ++boundTextures;
+                        }
+                    }
+                    slots += Log::Format(
+                        " [%u]=%p mod=%d original=%d private=%d textures=%zu/%zu%s",
+                        static_cast<unsigned>(i), material,
+                        isModSlot ? 1 : 0, isOriginalSlot ? 1 : 0, isPrivate ? 1 : 0,
+                        boundTextures, overrides,
+                        DescribeMaterialState(material).c_str());
+                }
+
+                Log::InfoFmt(
+                    "[ModAudit] %s: mod=%s source=%s renderer=%p registered=%p same=%d name=\"%s\" mesh=%p patchedMesh=%d originalMesh=%d slots=%s",
+                    label,
+                    patch.modId.c_str(),
+                    patch.sourceName.c_str(),
+                    renderer,
+                    patch.patchedRenderer,
+                    renderer == patch.patchedRenderer ? 1 : 0,
+                    GetUnityObjectNameString(renderer).c_str(),
+                    mesh,
+                    patchedMesh ? 1 : 0,
+                    originalMesh ? 1 : 0,
+                    slots.c_str());
+            }
+
+            // Complementary half: a patch whose mesh is nowhere in the live set
+            // is the interesting case, and only a line that prints on zero hits
+            // can prove it.
+            Log::InfoFmt(
+                "[ModAudit] %s: mod=%s source=%s renderer=%s liveRenderers=%zu withPatchedMesh=%zu withOriginalMesh=%zu",
+                label,
+                patch.modId.c_str(),
+                patch.sourceName.c_str(),
+                patch.rendererName.c_str(),
+                liveRenderers.size(),
+                withPatchedMesh,
+                withOriginalMesh);
         }
     }
 

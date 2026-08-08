@@ -9,6 +9,9 @@
 #include <MinHook.h>
 
 #include "../../src/deps/UnityResolve/UnityResolve.hpp"
+// Same DLL since the manager moved in-tree, so the runtime's diagnostics are a
+// direct call rather than another API entry.
+#include "ModRuntime.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -1631,6 +1634,9 @@ namespace GakumasModManager {
         }
 
         bool ComposeModScreen(void* tab) {
+            // Opening the sheet is the only user-driven main-thread moment we
+            // get while the wrong colours are still on screen behind it.
+            GakumasMod::Runtime::AuditLivePatches("mod menu opened");
             ModPresentationModel model;
             if (!LoadPresentationModel(model)) {
                 Log("Mod menu: full-screen composition stopped because the Runtime is unavailable.");
@@ -1994,6 +2000,7 @@ namespace GakumasModManager {
             }
             LogF("Mod menu: setModEnabled succeeded mod=%s enabled=%d status=%s.",
                  binding->modId.c_str(), displayed, status.c_str());
+            GakumasMod::Runtime::AuditLivePatches("just after toggle");
             return true;
         }
 
