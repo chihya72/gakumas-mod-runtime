@@ -238,7 +238,8 @@ namespace GakumasMod::Runtime::Catalog {
             std::unordered_map<std::string, std::vector<size_t>> groups;
             for (size_t index = 0; index < records.size(); ++index) {
                 const auto& record = records[index];
-                if (record.manifestState != "valid" || !record.configuredEnabled) continue;
+                if (record.manifestState != "valid" || !record.configuredEnabled
+                    || record.autoDisabledByConflict || record.enableBlockedByConflict) continue;
                 groups[record.targetKind + "|" + record.targetKey].push_back(index);
             }
 
@@ -444,23 +445,15 @@ namespace GakumasMod::Runtime::Catalog {
                                     (*changed)->id.c_str(), rollback);
                             }
                         }
-                        for (auto disabled = sessionDisabled.rbegin();
-                             disabled != sessionDisabled.rend();
-                             ++disabled) {
-                            const auto rollback = GakumasMod::Runtime::SetSessionModEnabled(
-                                (*disabled)->id.c_str(), 1);
-                            if (rollback != GMR_OK) {
-                                Log::ErrorFmt(
-                                    "[RuntimeApi] Failed to roll back startup conflict session: mod=%s result=%u",
-                                    (*disabled)->id.c_str(), rollback);
-                            }
-                        }
+                        // Keep the whole group disabled for this session. The
+                        // manifests may remain enabled after rollback, but
+                        // re-enabling the runtime entries here would silently
+                        // select a priority winner and violate the fail-closed
+                        // startup-conflict contract.
                         break;
                     }
                     persisted.push_back(&record);
                 }
-                if (persistenceFailed) continue;
-
                 for (size_t position = 0; position < indexes.size(); ++position) {
                     auto& record = records[indexes[position]];
                     const auto otherIndex = indexes[(position + 1) % indexes.size()];
@@ -470,6 +463,9 @@ namespace GakumasMod::Runtime::Catalog {
                         record.id.c_str(),
                         records[otherIndex].id.c_str(),
                         record.targetKey.c_str());
+                }
+                if (persistenceFailed) {
+                    Log::Warn("[RuntimeApi] Startup conflict remained disabled for this session because persistence failed.");
                 }
             }
         }

@@ -1,6 +1,6 @@
 # Manifest v2
 
-> 最后更新：2026-08-05。`enabled` 同时控制当前 Runtime 会话和下次启动配置；标准
+> 最后更新：2026-08-12。`enabled` 同时控制当前 Runtime 会话和下次启动配置；标准
 > `SkinnedMeshRenderer` 替换支持热开关，不再默认要求重启游戏。
 
 runtime 扫描：
@@ -51,7 +51,7 @@ gakumas-mod/mods/<mod-id>/mod.json
 ```
 
 这里的 `version` 是单个 Mod 包自己的版本号，不是 Runtime 插件版本；当前 Runtime
-发布版本为 `0.3.0`。
+发布版本为 `1.0.0`。
 
 ## 字段
 
@@ -79,17 +79,42 @@ gakumas-mod/mods/<mod-id>/mod.json
 |---|---|
 | `runtimeProtocol` | 整数，**必须等于 `1`**。对不上即判定为导出器与 runtime 版本不匹配 |
 | `buildId` | 非空字符串，用于把 bundle 与日志对上号 |
-| `bones` | 数组。每项必须有 `name`（字符串）与 `localPosition` / `localRotation` / `localScale`；`parentIndex` 可选（默认 `-1` 表示根）。可选 `swing` 对象带 `damping` / `stiffness` / `spring` / `mass` / `rootWeight` / `pendulum` / `useWindGlobalForce` 与 `collider`（`radius` / `type` / `collisionMask`） |
+| `bones` | 数组。每项必须有 `name`（字符串）与 `localPosition` / `localRotation` / `localScale`；`parentIndex` 可选（默认 `-1` 表示根）。可选 `swing` 对象，字段见下 |
 
 可选的 `extraSwingBones` / `newBones` 数组用同样的 transform 字段，但用 `parentName`
-而不是 `parentIndex` 挂接。
+而不是 `parentIndex` 挂接。**它们同样会被 runtime 建成 `ActorSwingDynamicBone`，所以
+`swing` 该带的一项都不能少**——缺了就落进 `SetDefaultValues` 的惰性默认值。
 
-> **摆动链要带链尾 tip 骨。**这不是 runtime 的校验项，是数据完整性要求：游戏的
-> `UpdateChainInfo` 本就排除每条链的最后一根骨，sidecar 少写 tip 就等于少一节摆动。
+可选的 `swingChains` 数组描述要新建的 `ActorSwingChain`：`host`（宿主骨名）、
+`rootBones`（链根骨名数组）、`category` / `chainLength`（信息字段）。**必须按链长分组**，
+长短链混在一条里会被 `UpdateChainInfo` 截到最短成员的长度。
+写了 `swingChains` 但不是数组 = 整份 sidecar 报错（此前是静默当作"没有链"，包被验证器判坏
+而实机看起来只是"不摆"）。`chainLength` 只进日志，类型错了由 `verify_ab_package.py` 报错，
+运行时按缺省 0 处理、不会因此作废整份 sidecar。
+
+### `swing` 字段
+
+| 字段 | 说明 |
+|---|---|
+| `damping` / `stiffness` / `spring` / `mass` | 基本摆动参数 |
+| `pendulum` / `pendulumRange` | 重力项与其作用范围。**`pendulumRange` 留 0 等于把重力项乘没了**，原版 84.6% 取 `1.0`（中位数 1.0） |
+| `wind` / `useWindGlobalForce` | 风力。`useWindGlobalForce` 写 JSON 布尔或 0/1 都收 |
+| `rootWeight` | 跟随链根的比例。留 `1.0`（`SetDefaultValues` 的默认）= 完全刚性、锁死不摆；原版 89.5% 取 `0.3` |
+| `colliderRadius` / `colliderRadiusSub` / `colliderType` / `collisionMask` | 碰撞体。**也仍收旧的嵌套写法** `collider: {radius, type, collisionMask}`；两种都在时平铺的优先 |
+| `useLimit` / `limitX` / `limitY` / `limitZ` | 每轴角度限位（度）。⚠️ 限位是**按骨轴**授权的：原版摇物骨的子骨一律在 local −X，而 MMD 等外部 rig 常在 local −Z，照搬原版限位会锁死真正的摆动轴。拿不准就写 `useLimit: 0` |
+| `dynamicType` | `0`=Swing、`1`=Slide |
+
+> **摆动链要带链尾 tip 骨。**这不是 runtime 的校验项，是数据完整性要求：**链深 N → N 层，
+> 链尾也在层里**，少写 tip 就少一层、且末节朝向未定义。
 > 无权重的 tip 骨不会出现在 `m_Bones` 里，导出器要显式补。
+>
+> ⚠️ 2026-08-11 修正：本节曾写「`UpdateChainInfo` 本就排除每条链的最后一根骨」。**排除那
+> 半句是错的**——实测游戏自己的裙摆链 `layer[4]` 里就有 `LeftBackSkirt5_S_End`。要补 tip
+> 这个结论不变，但理由是「多一节多一层」，不是「防止真正该摆的那根被当 tip 排除」。
 
-`mod.json` 顶层也会带一份同值的 `runtimeProtocol` / `buildId`（由导出器写入，便于离线
-校验工具比对），但 runtime 只强制校验 sidecar 里的那份。
+`mod.json` 顶层也会带一份同值的 `runtimeProtocol` / `buildId`。顶层 `runtimeProtocol` 若存在，
+runtime 会要求它是整数 `1`；缺失时兼容旧包。sidecar 中的 `runtimeProtocol` / `buildId` 是骨架
+契约的硬校验，顶层 `buildId` 供离线校验工具与 sidecar 比对。
 
 GakumasMI 插件导出时自动生成 sidecar；**手写 manifest 时这三个字段最容易漏**。
 
@@ -130,14 +155,18 @@ API 切换成功时先更新当前会话有效 replacement map，再原子写回
 `SkinnedMeshRenderer` 规则会：
 
 - 首次应用时保存原 Mesh、材质、骨骼、根骨和每材质 `MaterialPropertyBlock`；
-- OFF 时恢复当前场景实例与缓存 Prefab；
-- ON 时对目标资源子树重应用并刷新活动 Animation Rig；
+- OFF 时只恢复当前 Renderer 快照中仍存活、且与可逆记录匹配的实例；不跨帧保留场景对象指针；
+- ON 时对当前目标资源子树重应用；当前无目标时按 `modId + source` 排队，等角色或 Renderer
+  生命周期回调到来后重试。此时 `hotInstances=0` 是正常的延迟状态；
 - 冷路径（资源加载时）的 Mod 贴图写入 Runtime 创建的私有材质；活体热路径直接写游戏自己的
   per-actor 材质，写前快照原贴图，OFF 时先注销 override 再写回；
 - 已有 `MaterialPropertyBlock` 只作为兼容性快照保留，不是贴图写入者。实机探针确认这些场景
   从不调用 `Renderer.SetPropertyBlock`；
-- `Renderer.set_sharedMaterials` / `set_materials` 的钩子只作诊断保留。「游戏写回材质数组
-  导致热 ON 颜色错」这条归因已被抓帧证伪，真因是换空间时漏搬法线/切线，已修复。
+- `Renderer.set_sharedMaterials` / `set_materials` 的钩子保留兼容性诊断，并作为延迟热重应用的
+  Renderer 生命周期触发器；「游戏写回材质数组导致热 ON 颜色错」这条归因仍已被抓帧证伪，
+  真因是换空间时漏搬法线/切线，已修复；
+- 新增摇物骨/链只在 prefab graft 与角色初始化阶段进入 Animation Rig；对已经初始化的活体直接
+  热 ON 不会补建新链，必须重新进入场景。
 
 整对象替换和附加式规则暂不保证即时逆转；它们可能需要重新选择资源、重进场景或重启。
 热开关改变的是 Manifest 状态与 Runtime 会话，不会把 AssetBundle 改成启动时全部预加载；

@@ -7,15 +7,31 @@
 #include "ModPaths.hpp"
 #include "ModRuntime.hpp"
 #include "ModRuntimeCatalog.hpp"
+#include "RuntimeBootstrap.hpp"
 #include "gkmm/ManagerEntry.hpp"
 
 #include <Windows.h>
 
 #include <filesystem>
+#include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
 namespace {
+    const char g_moduleAnchor{};
+    std::once_flag g_startOnce;
+
+    void PinRuntimeModule() {
+        HMODULE pinnedModule{};
+        if (!GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                reinterpret_cast<LPCWSTR>(&g_moduleAnchor),
+                &pinnedModule)) {
+            throw std::runtime_error("cannot pin runtime module");
+        }
+    }
+
     void SetGameWorkingDirectory() {
         std::string moduleName;
         moduleName.resize(MAX_PATH);
@@ -35,15 +51,11 @@ namespace {
                 ec.message().c_str());
         }
     }
-}
 
-BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
-    if (reason == DLL_PROCESS_ATTACH) {
-        DisableThreadLibraryCalls(module);
-        SetGameWorkingDirectory();
-        std::thread([] {
+    void BootstrapRuntime() noexcept {
+        try {
             // Before Initialize: its own lines have to obey the configured
-            // level too.  SetGameWorkingDirectory already ran, so the relative
+            // level too. SetGameWorkingDirectory already ran, so the relative
             // config path resolves.
             const auto requested = GakumasMod::Config::ReadLogLevel(
                 GakumasMod::Paths::Config());
@@ -86,11 +98,36 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
                 configured.value_or(true) ? 1 : 0,
                 configured ? "modManagerUi" : "absent or unusable, defaulting on");
             if (configured.value_or(true)) GkmmInitialize();
-        }).detach();
+        }
+        catch (...) {
+            OutputDebugStringA("[GakumasMod] Runtime bootstrap failed.\n");
+        }
     }
-    else if (reason == DLL_PROCESS_DETACH) {
-        GkmmShutdown();
-        GakumasMod::Runtime::Shutdown();
+}
+
+namespace GakumasMod::Bootstrap {
+    void EnsureStarted() noexcept {
+        try {
+            std::call_once(g_startOnce, [] {
+                // This DLL installs process-wide hooks and owns detached probe
+                // threads. Pin it before either starts so FreeLibrary cannot
+                // leave callbacks pointing into an unloaded image.
+                PinRuntimeModule();
+                SetGameWorkingDirectory();
+                std::thread(BootstrapRuntime).detach();
+            });
+        }
+        catch (...) {
+            // A failed pin/thread creation leaves initialization uncommitted;
+            // std::call_once permits a later XInput call to retry.
+            OutputDebugStringA("[GakumasMod] Could not start runtime bootstrap.\n");
+        }
+    }
+}
+
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
+    if (reason == DLL_PROCESS_ATTACH) {
+        DisableThreadLibraryCalls(module);
     }
     return TRUE;
 }

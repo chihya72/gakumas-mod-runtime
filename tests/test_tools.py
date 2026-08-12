@@ -75,6 +75,21 @@ class ToolSmokeTest(unittest.TestCase):
 
 
 class RuntimeSourceContractTest(unittest.TestCase):
+    def test_dllmain_is_minimal_and_runtime_starts_after_loader_lock(self) -> None:
+        main = (ROOT / "src" / "runtime" / "main.cpp").read_text(encoding="utf-8")
+        proxy = (ROOT / "src" / "runtime" / "xinput1_3_proxy.cpp").read_text(
+            encoding="utf-8"
+        )
+        dllmain = main[main.index("BOOL APIENTRY DllMain") :]
+
+        self.assertIn("DisableThreadLibraryCalls(module);", dllmain)
+        self.assertNotIn("std::thread", dllmain)
+        self.assertNotIn("Runtime::Initialize", dllmain)
+        self.assertNotIn("Runtime::Shutdown", dllmain)
+        self.assertNotIn("GkmmShutdown", dllmain)
+        self.assertIn("GET_MODULE_HANDLE_EX_FLAG_PIN", main)
+        self.assertEqual(proxy.count("GakumasMod::Bootstrap::EnsureStarted();"), 8)
+
     def test_persistent_texture_override_keeps_unity6_abi_and_slot_precedence(self) -> None:
         source = (ROOT / "src" / "runtime" / "ModRuntime.cpp").read_text(encoding="utf-8")
 
@@ -128,6 +143,10 @@ class RuntimeSourceContractTest(unittest.TestCase):
 
     def test_session_toggle_has_reversible_live_renderer_path(self) -> None:
         source = (ROOT / "src" / "runtime" / "ModRuntime.cpp").read_text(encoding="utf-8")
+        reapply_state = (ROOT / "src" / "runtime" / "ReapplyState.hpp").read_text(
+            encoding="utf-8"
+        )
+        implementation = source + "\n" + reapply_state
 
         for symbol in (
             "struct ReversibleRendererPatch",
@@ -144,14 +163,20 @@ class RuntimeSourceContractTest(unittest.TestCase):
             "RestoreRendererPropertyBlockSnapshots",
             "GetComponentDepthFromRoot",
             "g_reapplyRendererIdentities",
+            "QueuePendingLiveReapply",
+            "RetryPendingLiveReapplies",
+            "IsRuntimeOwnedMesh",
+            "RememberReapplyRendererIdentity",
         ):
-            self.assertIn(symbol, source)
+            self.assertIn(symbol, implementation)
         self.assertNotIn("g_loadedSourceGameObjects", source)
         self.assertNotIn("RememberLoadedSourceGameObject", source)
 
         toggle = source[source.index("GmrResult SetSessionModEnabled") : source.index("bool Initialize()")]
         self.assertIn("stateChanged && requestedEnabled", toggle)
         self.assertIn("ReapplyLiveModInstances(*replacement)", toggle)
+        self.assertIn("QueuePendingLiveReapply", toggle)
+        self.assertIn("ClearPendingLiveReappliesForMod", toggle)
         self.assertIn("RestoreLiveModInstances(modIdUtf8)", toggle)
         self.assertNotIn("existing instances refresh after asset reload", toggle)
 
@@ -178,12 +203,20 @@ class RuntimeSourceContractTest(unittest.TestCase):
             "GetSourceRootGameObject(renderer, identity->sourceRootDepth)",
             collect,
         )
+        self.assertIn("tryCollect(observedRenderer);", collect)
         self.assertNotIn("GetComponentsInChildren<void*>(rendererClass, true)", collect)
         self.assertNotIn("rememberedSources", collect)
         self.assertNotIn(
             "AddUniqueLiveObject(targets, GetHierarchyRootGameObject(renderer))",
             collect,
         )
+
+        remember = source[
+            source.index("void RememberSourceRendererIdentities") :
+            source.index("void* ReplaceLocalModAssetIfNeeded")
+        ]
+        self.assertIn("IsRuntimeOwnedMesh(mesh)", remember)
+        self.assertIn("RememberReapplyRendererIdentity", remember)
 
         reapply = source[
             source.index("size_t RefreshAnimationRigsAfterHotReapply") :

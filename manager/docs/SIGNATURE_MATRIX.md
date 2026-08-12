@@ -1,6 +1,6 @@
 # IL2CPP 签名矩阵
 
-> 最后更新：2026-08-05
+> 最后更新：2026-08-12
 
 本表只服务当前游戏内 Mod 管理器。借卡、好友和网络 API 不属于当前实现范围，相关历史
 研究不进入本表的 Release 调用路径。
@@ -163,7 +163,7 @@ MenuView.GetSubButton(...):
 | 头部 ID | `CostumeHead.get_Id()` | A，当前 Master 解析链使用 |
 | 发型资源 ID | `CostumeHead.get_HairAssetId()` | A，归一化后命中 `mdl_chr_ttmr-hair-0002_hair` |
 | 发型名称/角色 | `CostumeHead.get_Name()` / `CostumeHead.GetCharacter()` | A，截图确认“月村手毬 · 公主皇冠” |
-| 发型预览资源 | `CostumeHead.GetThumbAssetName()` | A/B：实机日志返回 `img_cos_costume_head_ttmr-hair-0002_head` 并交给 `ThumbnailViewBase.Set`；最终图像可见待确认 |
+| 发型预览资源 | `CostumeThumbnailView.Set(ICostume)`，参数为 master `CostumeHead` | A/B：`CostumeHead` 实现 `ICostume`，当前源码已走与服装相同的官方组件；最终图像可见待确认。旧的 `GetThumbAssetName + ThumbnailViewBase.Set` 路线已删除 |
 
 发型必须通过 `hairAssetId`、Costume 引用和游戏实际发型格子交叉确认，不能只根据 `source`
 字符串拼接玩家名称。
@@ -175,7 +175,7 @@ MenuView.GetSubButton(...):
 | 正式页面层 | 真实 Setting 导航创建的 `SettingWindow` / `SettingTopScreen` 实例 | A，全屏截图及三种页面切换日志确认 |
 | 当前内容容器 | 设置页 `CampusSimpleTab` + `ScrollRect` | A，18:20 截图确认 |
 | 固定 Mod Cell | 设置行表面 + 缩略图区 + 两段文字 + `SwitchButton` | A，服装与发型页截图确认结构 |
-| 官方缩略图 | 服装：`CostumeListCellThumbnailView.Set`；发型：`CostumeHead.GetThumbAssetName` + `ThumbnailViewBase.Set` | A：服装；A/B：发型资源提交有日志、最终图像待确认 |
+| 官方缩略图 | 服装：`CostumeListCellThumbnailView.Set`；发型：`CostumeThumbnailView.Set(ICostume)`，传 master `CostumeHead` | A：服装；A/B：发型当前调用链已由 metadata/源码确认，最终图像待确认 |
 | 服装完整格子 | 摄影或换装页面的 Cell/ItemModel/Presenter | B/C，必要时的下一层方案 |
 | 发型完整格子 | CostumeHead 选择页面的 Cell/ItemModel/Presenter | B/C，必要时的下一层方案 |
 | 分页 | `CampusSimpleTab` / `CampusSimpleTabButton` | A |

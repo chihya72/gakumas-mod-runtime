@@ -1,6 +1,6 @@
 # 游戏内 Mod 管理页面：当前流程与验证状态
 
-> 最后更新：2026-08-09
+> 最后更新：2026-08-12
 > 本文描述当前源码和当前部署版。证据状态严格分为“已实机确认”和“已部署待复验”；
 > 编译成功或日志中的局部调用不能替代可见实机结果。
 > Release 只有 `xinput1_3.dll`；Runtime 与管理 UI 编译在同一模块中。
@@ -29,26 +29,25 @@
 2026-08-09 实机确认：热 ON 后直接回主页颜色即正确，同会话 12 轮 ON/OFF 的贴图还原、
 网格还原和克隆释放全部配对成功。热开关主链和颜色问题都已收口。
 
+2026-08-12 实机确认：如果管理页切换时当前场景没有目标 Renderer，ON 会以
+`hotInstances=0` 进入延迟队列；`hmsz-fuyuko-icu` 返回主页时资源加载路径已先完成替换，
+Renderer 生命周期回调随后以 `applied=0 alreadyPatched=1` 确认并清队列。此前“必须先进一次
+换装页”的缺陷已经收口，但 `atbm-cstm-0140` 的同分支尚未单独复验。
+
 仍待实机复验的一项：`SettingTopScreen.Reload()` 复用同一个 `MenuView` 地址时主动失效入口
 注入缓存，避免从 Mod 管理返回系统设置后菜单中缺少“Mod 管理”。
 
-所以当前结论是：**完整页面、热开关和热 ON 颜色均已跑通；菜单缓存失效补丁与完整生命周期
-矩阵仍待实机验收。**
+所以当前结论是：**完整页面、直接热开关、颜色修复和零活体延迟重应用（hmsz 样本）均已跑通；
+菜单缓存失效补丁、atbm 延迟分支与完整生命周期矩阵仍待实机验收。**
 
 ## 2. 构建与部署基线
 
 游戏目录里只需要**一个**本项目 DLL：`xinput1_3.dll`，Runtime 与管理器 UI 编在一起；
 Release 不生成或加载第二个管理器 DLL。
 
-当前部署版的大小与 SHA-256 只在 [`../README.md`](../README.md) 维护一份（那一行随重编译
-更新），本文不再抄写——此处抄过的两份哈希都过期过。核对用
+当前部署版的大小与 SHA-256 不在设计文档中手抄；以对应 release notes 或目标文件现场结果
+为准。核对用
 `Get-FileHash <游戏目录>\xinput1_3.dll -Algorithm SHA256`。
-
-联合替换前的备份：
-
-```text
-<游戏目录>\codex-backups\20260801-212145-menu-entry-mpb-refresh
-```
 
 历史可复现基线：
 
@@ -59,6 +58,7 @@ Release 不生成或加载第二个管理器 DLL。
 | 后续部署版 | 固定行、Master 名称、服装缩略图、发型名称、开关帧末校正 | 截图与日志已确认 |
 | 21:13–21:14 上一部署版 | 三种幂等导航分支执行成功 | Reload 后同地址菜单入口缓存缺陷被复现 |
 | 2026-08-09 部署版 | 法线/切线随顶点换空间、活体路径直写游戏材质、OFF 先注销再还原、热 OFF 释放并销毁克隆 | 12 轮 ON/OFF 实机确认，日志 `properties=3/3`、`destroyed=1` 全配对 |
+| 2026-08-12 部署版 | 零活体 ON 延迟队列、多代原 Mesh 身份刷新、生命周期重试 | `hmsz-fuyuko-icu` 返回主页自动生效；`alreadyPatched=1` 正常清队列，无异常或重复应用 |
 
 ## 3. 当前源码流程
 
@@ -119,7 +119,7 @@ GetModsJson
   → 取得两页 ScrollRect.content
   → 复制设置页原生开关行，生成固定 Mod Cell
   → 服装调用官方 CostumeThumbnail 组件
-  → 发型调用 CostumeHead.GetThumbAssetName + ThumbnailViewBase.Set
+  → 发型把 master CostumeHead 作为 ICostume 交给 CostumeThumbnailView.Set
   → 保存活动 CampusSimpleTab 身份和各开关的 modId 绑定
 ```
 
@@ -134,7 +134,8 @@ PressHook 识别克隆行内部 CampusButton
   → Runtime 检查同目标冲突
   → 更新当前会话有效 replacement map
   → 原子写回 mod.json 的 enabled
-  → 标准 SkinnedMeshRenderer 规则恢复或重应用当前实例与缓存 Prefab
+  → 标准 SkinnedMeshRenderer 规则恢复或重应用当前快照中的活体实例
+  → ON 时若当前无目标 Renderer，按 modId + source 排队等待生命周期重试
   → 管理器重读 Runtime 快照
   → 重建当前页文本并校正所有受影响开关
 ```
@@ -156,9 +157,13 @@ Presentation Model 和 Runtime catalog 测试已覆盖这些规则；冲突两�
 Runtime 启动时注册全部有效候选，但 AssetBundle 仍懒加载。标准原地替换首次应用时记录
 Renderer 的原 Mesh、材质、骨骼、根骨和已有每材质 `MaterialPropertyBlock`：
 
-- OFF：恢复当前场景实例与缓存 Prefab；
-- ON：只对目标服装/发型资源子树重应用，并刷新活动 Animation Rig；
+- OFF：恢复当前 Renderer 快照中仍存活、且与可逆记录匹配的实例；不跨帧持有旧场景指针；
+- ON：对当前目标资源子树重应用；当前无目标时排队，在 `RegisterBones` 或 Renderer 材质生命
+  周期回调中重试；
 - 整对象替换和附加式规则：不承诺可逆，继续按资源重新加载降级。
+
+新增摇物骨/链只在 prefab graft 与角色初始化阶段建立；已经初始化的活体热 ON 只刷新网格、
+材质、骨绑定和碰撞体，改变 swing 结构后必须重新进入场景。
 
 热 ON 后的颜色问题已于 2026-08-09 解决：真因是换空间时只搬顶点、没搬法线和切线，
 活体角色有真实旋转就会让法线与几何脱节。
@@ -169,7 +174,7 @@ Renderer 的原 Mesh、材质、骨骼、根骨和已有每材质 `MaterialPrope
 > 与正常帧的身体 draw 逐字节相同）。基于它们的几轮修复改的都是没执行或没问题的路径。
 
 量化证据与其余教训见 [`../../docs/lessons-learned.md`](../../docs/lessons-learned.md)，
-仍未解的三条见 [`../../docs/roadmap.md`](../../docs/roadmap.md)。
+当前边界与未解项见 [`../../docs/roadmap.md`](../../docs/roadmap.md)。
 
 ## 4. 三种幂等导航
 
@@ -221,8 +226,8 @@ g_modButton = nullptr
 
 1. 在用户手动启动游戏后，执行 Mod → 设置 → 菜单，确认“Mod 管理”入口仍存在；再执行
    设置 → Mod、Mod → Mod，确认没有卡住、叠页或错误启动；
-2. 对同一标准服装 Mod 执行 ON/OFF/ON；每次开关后直接回主页，确认 Mesh、材质、骨骼和
-   颜色正确（不再需要进换装页面），并确认多轮开关后内存不增长；
+2. 用 `atbm-cstm-0140` 复验“当前无目标 Renderer → ON 排队 → 返回主页自动生效”；`hmsz` 样本
+   已通过，不再重复算作未验；
 3. 打开发型页，截图确认“月村手毬 · 公主皇冠”的官方预览图实际可见；
 4. 实机触发启动时冲突组全关，以及运行中新 Mod 被占用者拒绝的两种提示；
 5. 验证返回主页、重登、重复打开、16:9/16:10、空列表、长名称和大量条目；

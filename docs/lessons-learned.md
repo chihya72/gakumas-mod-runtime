@@ -51,6 +51,7 @@
 | 热路径也该像冷路径那样克隆私有材质 | **错**。活体角色的材质是游戏自己维护的 per-actor 拷贝，换成克隆等于把 renderer 从游戏的更新链上摘下来。热路径应当直接写游戏那份，并快照原贴图供 OFF 还原 |
 | 可以调 `CampusActorModelParts.InitializeCampusMaterials()` 刷新派生材质状态 | **错**。在活体 actor 上重跑会把整个材质数组换成 shader 无属性的空材质（审计打出 `keywords=[] floats=[]`），角色变洋红，后续开关全废。已从源码删除并留注释 |
 | 放掉 gchandle 就等于释放了克隆的 Mesh | **错**。Mesh 是原生 Unity 对象，GC 只管托管包装。必须 `Object.Destroy`，否则每次热 ON 泄漏约 16 MB |
+| `hotInstances=0` 表示热 ON 失败，只能让玩家进一次换装页 | **错**。切换发生在管理页时，目标 Renderer 可能尚未创建。当前实现按 `modId + source` 排队，并由 `RegisterBones`/Renderer 生命周期重试；资源路径若已先应用，会以 `alreadyPatched=1` 安全清队列 |
 
 **真因（2026-08-09 定案）**：`TransformModMeshVerticesToOriginalRendererSpace` 换空间时
 只搬顶点，法线和切线留在原地。冷路径两端都是 prefab 单位阵，空操作；热路径的目标是有真实
@@ -66,7 +67,7 @@
 |---|---|
 | Hook `Renderer.SetMaterialArray_Injected` 底层 icall | 启动阶段对每个 Renderer 扫描 + 按托管三参数 ABI 调原生 icall → 加载卡住 |
 | 改成原生两参数签名 + 受限扫描 | 点击 ON/OFF 直接崩 |
-| 热恢复时枚举全场 Renderer | 在 Unity 更新角色层级期间做全局扫描 → 崩 |
+| 旧版热恢复在 Unity 更新角色层级期间扫描并继续使用缓存对象 | 与跨帧缓存的 Renderer/GameObject 指针混用 → 崩；不能由此推导“任何当前快照枚举都不安全” |
 | 直接拿已登记的 Prefab Renderer 指针做热恢复目标 | 崩。指针不能当场景实例用 |
 | 热路径里调 `Object.IsNativeObjectAlive` 做存活检查 | 崩 |
 | 管理器把 ON/OFF 放进帧末队列规避重入 | 只是为排查崩溃临时加的，问题不在这里，已撤回 |
@@ -74,9 +75,10 @@
 | 热重应用后调 `CampusActorModelParts.InitializeCampusMaterials()` | 材质数组被换成空 shader 材质，角色洋红，之后所有开关失效 |
 | 活体路径继续灌每材质 `MaterialPropertyBlock` | 贴图已经写在材质上，这层多余；已只在冷路径保留 |
 
-**结论**：这条链上凡是「在 Unity 正在更新角色层级时做全局对象扫描」或「跨帧持有 Unity
-对象指针」的做法都会崩。当前实现只使用刚从 `GetComponentsInChildren` 拿到的组件指针。
-另外，**不要在活体 actor 上重跑游戏自己的初始化方法**——它们假定的是构建期的上下文。
+**结论**：不能跨帧信任缓存的 Unity 场景对象指针。当前实现每次只使用
+`FindObjectsByType<SkinnedMeshRenderer>` 返回的当前快照；生命周期 Hook 传入的 observed renderer
+也只在本次调用中检查，绝不放进延迟队列。另一个边界是：**不要在活体 actor 上重跑游戏自己的
+初始化方法**——它们假定的是构建期上下文；新增摇物链应在 prefab graft 阶段完成。
 
 ---
 
@@ -104,17 +106,17 @@
 2. **IL2CPP 重载必须按参数类型名解析。** 按「名字 + 参数个数」找会取到错误的重载并静默
    失败（同 argc 的重载很常见）。
 3. **手抄的 DLL 大小和 SHA-256 一定会过期。** 这个仓库为此栽过三次，两份文档的哈希还能
-   互相打架。现在只有 `manager/README.md` 维护一行「当前」，release 的哈希由发布脚本写进
-   release notes，其余文档一律不抄。
+   互相打架。当前值只以 release notes 或目标文件现场 `Get-FileHash` 为准，其余文档一律不抄。
 4. **同一事实不要在多份文档各存一份。** 实机证据时间线一度存在三份副本，改一处漏两处。
-5. **托管异常会直接穿过 native 帧。** `CampusActorAnimationRig.RegisterBones` 抛出后，
-   热重应用后面的代码一行都没跑：renderer 没刷新、状态没落盘、catalog 和 runtime 状态
-   分叉，表现成「开关点了没反应」。本项目不开 C++ 异常，所以要拦得用 `__try/__except`。
+5. **不要用 SEH 把数据结构不变量错误包装成“可恢复”。** 旧实现向已经初始化好的
+   `swingDynamicBones/swingChains` 追加数据，却没有同步 `initialTransforms` 等并行表，导致
+   `RegisterBones` 越界；SEH 只能阻止整次 toggle 中断，不能让链成立。当前修法是在 prefab graft
+   阶段建骨建链，让游戏初始化一次性收走，相关 SEH 兜底已删除。
 6. **Unity 原生对象不归 GC 管。** Mesh、Material 这些 `Instantiate` 出来的对象，放掉
    gchandle 只让托管包装可回收，原生内存要 `Object.Destroy` 才还。
 
 ---
 
-已解决缺陷的真因与仍未解的三条见 [`roadmap.md`](roadmap.md)；UI 流程与安全边界见
+已解决缺陷的真因与当前边界见 [`roadmap.md`](roadmap.md)；UI 流程与安全边界见
 [`../manager/docs/UI_FLOW.md`](../manager/docs/UI_FLOW.md)。逐轮排查日志、暗色渲染误判的
 完整过程和独立入口 DLL 的证据已随本文合并删除，需要时从 git 历史取。

@@ -19,25 +19,25 @@ licenses\
 不依赖 CI，任何时候都能跑：
 
 ```powershell
-.\tools\package.ps1 -Version v0.3.0
+.\tools\package.ps1 -Version v1.0.0
 ```
 
 它会依次运行仓库内 Premake、MSBuild Release x64、离线测试，然后在 `dist\` 下生成
-`gakumas-mod-runtime-0.3.0.zip`，附带项目和第三方许可证，并打印 zip 和 DLL 的 SHA-256。任一步失败就中断，
+`gakumas-mod-runtime-1.0.0.zip`，附带项目和第三方许可证，并打印 zip 和 DLL 的 SHA-256。任一步失败就中断，
 不会产出半成品包。
 
 已经编译过、只想重新打包：
 
 ```powershell
-.\tools\package.ps1 -Version v0.3.0 -SkipBuild
+.\tools\package.ps1 -Version v1.0.0 -SkipBuild
 ```
 
 拿到 zip 后网页上传，或者用脚本创建 release：
 
 ```powershell
 $env:GITEA_TOKEN = "<个人访问令牌，需要 write:repository>"
-.\tools\publish-release.ps1 -Tag v0.3.0 `
-    -Zip dist\gakumas-mod-runtime-0.3.0.zip `
+.\tools\publish-release.ps1 -Tag v1.0.0 `
+    -Zip dist\gakumas-mod-runtime-1.0.0.zip `
     -ApiBase https://git.chinosk6.cn/api/v1 `
     -Repository chihya72/gakumas-mod-runtime
 ```
@@ -49,8 +49,8 @@ $env:GITEA_TOKEN = "<个人访问令牌，需要 write:repository>"
 方便在不浪费标签的情况下验证流水线。
 
 ```powershell
-git tag v0.3.0
-git push origin v0.3.0
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
 ### 前提：一台 Windows runner
@@ -88,7 +88,7 @@ Gitea 默认从 github.com 拉取 action。如果实例访问不了 GitHub，`ac
 `tools\premake5.exe vs2022` 之前设好。它被编进 DLL，启动时写进日志：
 
 ```text
-[BOOT] GakumasMod: [ModAsset] gakumas-mod-runtime v0.3.0 loaded. logLevel=error ...
+[BOOT] GakumasMod: [ModAsset] gakumas-mod-runtime v1.0.0 loaded. logLevel=error ...
 ```
 
 本地不设就是 `dev`。用户报问题时让他们贴这一行，比对 DLL 哈希省事得多。

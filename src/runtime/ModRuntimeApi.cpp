@@ -1,5 +1,6 @@
 #include "ModRuntimeApi.h"
 #include "ModRuntimeCatalog.hpp"
+#include "RuntimeBootstrap.hpp"
 
 #include <cstring>
 
@@ -21,6 +22,7 @@ namespace {
     }
 }
 extern "C" GmrResult GMR_CALL GmrGetRuntimeApiV1(GmrRuntimeApiV1* output) {
+    GakumasMod::Bootstrap::EnsureStarted();
     if (!output || output->structSize < sizeof(uint32_t) * 2) {
         return GMR_E_INVALID_ARGUMENT;
     }

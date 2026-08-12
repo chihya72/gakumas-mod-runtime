@@ -1,6 +1,6 @@
 # Gakumas 游戏内 Mod 管理器：当前产品与发布计划
 
-> 最后更新：2026-08-09
+> 最后更新：2026-08-12
 > 本文只描述当前架构和仍有效的发布计划。已证伪结论和已撤回路线统一记录在
 > `../../docs/lessons-learned.md`，不得再作为实现依据。
 
@@ -59,6 +59,8 @@ Manifest 写回逻辑。
 - 开关写回、当前会话热更新、帧末视觉校正和稳定排序；
 - 启动冲突组关闭和运行中新项冲突拒绝的代码/离线契约；
 - 标准服装 `SkinnedMeshRenderer` 的 Mesh、材质、骨骼和根骨快照及热 OFF/ON；
+- 管理页 ON 时无目标 Renderer 的延迟重应用：`hmsz-fuyuko-icu` 已确认返回主页自动生效，
+  `hotInstances=0` 后由生命周期 Hook 以 `alreadyPatched=1` 收口；
 - Mod→Mod、设置→Mod、Mod→设置三种幂等导航的主分支。
 
 详细证据等级和当前待复验项见 `UI_FLOW.md` 与 `SIGNATURE_MATRIX.md`。
@@ -99,15 +101,17 @@ PropertyBlock；OFF 时先注销 override 再写回快照的原贴图（`Materia
 7. 缺 bundle、损坏 Manifest、只读文件等安全降级；
 8. 返回主页、重登、不同分辨率和长期重复打开。
 
-颜色问题已解决，不得再把 PropertyBlock 或材质数组写回写成原因。仍需作为已知问题记录的是
-无摆动声明的骨被挂 swing 组件导致的 `RegisterBones` 异常（见下）和冷路径克隆的累积。
+颜色问题与“管理页开启后必须进一次换装页”问题均已解决，不得再把 PropertyBlock/材质数组
+写回或 `hotInstances=0` 本身写成失败原因。当前仍需记录的是冷路径克隆累积、inactive prefab
+生命周期、活体热 ON 不能补建新摇物链，以及 `atbm-cstm-0140` 的零活体延迟分支尚未实机复验。
 
 ## 7. 发布后优先级
 
-1. 只给声明了摆动参数的骨挂 `ActorSwingDynamicBone`，替掉 `RegisterRigBonesGuarded` 的 SEH 兜底；
+1. 用 `atbm-cstm-0140` 复验“当前无 Renderer → ON 排队 → 返回主页自动生效”；
 2. 完成发型官方预览和完整生命周期矩阵；
-3. 完善 `appliedThisSession`、并发审计和离线 bundle asset-path 校验；
-4. 为整对象替换与附加式规则提供受控重载或清晰的重新加载提示。
+3. 明确冷路径克隆与 inactive prefab 的所有权/销毁时机；
+4. 完善 `appliedThisSession`、并发审计和离线 bundle asset-path 校验；
+5. 为整对象替换与附加式规则提供受控重载或清晰的重新加载提示。
 
 任何新结论都必须同时更新 `UI_FLOW.md`、`RESEARCH_SOURCES.md`、`SIGNATURE_MATRIX.md`、
 根 `README.md`、`docs/manifest-v2.md` 与 `docs/roadmap.md`。

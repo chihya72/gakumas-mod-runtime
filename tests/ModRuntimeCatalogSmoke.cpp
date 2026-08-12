@@ -1,10 +1,14 @@
 #include "ModRuntimeApi.h"
 #include "ModRuntimeCatalog.hpp"
+#include "ModPaths.hpp"
 
 #include "nlohmann/json.hpp"
 
 #include <Windows.h>
 
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -64,12 +68,14 @@ int main() {
     std::error_code ec;
     std::filesystem::remove_all(root, ec);
 
-    const auto mods = root / "gakumas-local" / "local-files" / "mods";
+    const auto mods = root / GakumasMod::Paths::kRootName / "mods";
     const auto bodyDir = mods / "body-enabled";
     const auto conflictDir = mods / "body-conflict";
     const auto hairDir = mods / "hair-disabled";
     const auto multiDir = mods / "multi-target";
     const auto missingDir = mods / "missing-bundle";
+    const auto persistenceFailureADir = mods / "persist-failure-a";
+    const auto persistenceFailureBDir = mods / "persist-failure-b";
 
     const auto bodyManifest = R"json({
       "schemaVersion": 2,
@@ -125,6 +131,28 @@ int main() {
         "bundle": "not-found.bundle"
       }]
     })json";
+    const auto persistenceFailureAManifest = R"json({
+      "schemaVersion": 2,
+      "id": "persist-failure-a",
+      "name": "Persist Failure A",
+      "enabled": true,
+      "replacements": [{
+        "source": "mdl_chr_ttmr-cstm-0999_body",
+        "part": "body",
+        "bundle": "body.bundle"
+      }]
+    })json";
+    const auto persistenceFailureBManifest = R"json({
+      "schemaVersion": 2,
+      "id": "persist-failure-b",
+      "name": "Persist Failure B",
+      "enabled": true,
+      "replacements": [{
+        "source": "mdl_chr_ttmr-cstm-0999_body",
+        "part": "body",
+        "bundle": "body.bundle"
+      }]
+    })json";
 
     WriteText(bodyDir / "mod.json", bodyManifest);
     WriteText(bodyDir / "body.bundle", "fixture");
@@ -136,6 +164,13 @@ int main() {
     WriteText(multiDir / "a.bundle", "fixture");
     WriteText(multiDir / "b.bundle", "fixture");
     WriteText(missingDir / "mod.json", missingManifest);
+    WriteText(persistenceFailureADir / "mod.json", persistenceFailureAManifest);
+    WriteText(persistenceFailureADir / "body.bundle", "fixture");
+    WriteText(persistenceFailureBDir / "mod.json", persistenceFailureBManifest);
+    WriteText(persistenceFailureBDir / "body.bundle", "fixture");
+    // PersistEnabled writes this exact sibling first. A directory at that path
+    // makes the atomic temp-file creation fail deterministically without ACLs.
+    std::filesystem::create_directory(persistenceFailureADir / "mod.json.gmr.tmp");
 
     const auto previous = std::filesystem::current_path();
     std::filesystem::current_path(root);
@@ -143,7 +178,7 @@ int main() {
     GakumasMod::Runtime::Catalog::SetReady(true);
 
     const auto initial = ReadSnapshot();
-    assert(initial.at("mods").size() == 5);
+    assert(initial.at("mods").size() == 7);
     assert(FindMod(initial, "body-enabled").at("configuredEnabled") == false);
     assert(FindMod(initial, "body-enabled").at("runtimeState") == "conflict_auto_disabled");
     assert(FindMod(initial, "body-enabled").at("conflict").at("withModId") == "body-conflict");
@@ -154,6 +189,12 @@ int main() {
     assert(FindMod(initial, "hair-disabled").at("runtimeState") == "disabled");
     assert(FindMod(initial, "multi-target").at("manifestState") == "multiple_targets");
     assert(FindMod(initial, "missing-bundle").at("manifestState") == "missing_bundle");
+    assert(FindMod(initial, "persist-failure-a").at("configuredEnabled") == true);
+    assert(FindMod(initial, "persist-failure-a").at("registeredThisSession") == false);
+    assert(FindMod(initial, "persist-failure-a").at("runtimeState") == "conflict_auto_disabled");
+    assert(FindMod(initial, "persist-failure-b").at("configuredEnabled") == true);
+    assert(FindMod(initial, "persist-failure-b").at("registeredThisSession") == false);
+    assert(FindMod(initial, "persist-failure-b").at("runtimeState") == "conflict_auto_disabled");
 
     assert(GakumasMod::Runtime::Catalog::SetModEnabled("hair-disabled", 1) == GMR_OK);
     const auto afterEnable = ReadSnapshot();

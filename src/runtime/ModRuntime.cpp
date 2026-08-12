@@ -3,6 +3,7 @@
 #include "ModIl2cppUtils.hpp"
 #include "ModLog.hpp"
 #include "ModPaths.hpp"
+#include "ReapplyState.hpp"
 #include "ModRuntimeCatalog.hpp"
 
 #include <Windows.h>
@@ -150,15 +151,7 @@ namespace GakumasMod::Runtime {
             std::string originalRootBoneName;
         };
 
-        // Reapply identity deliberately contains no scene object pointers.  Scene
-        // GameObjects and renderers are destroyed/recreated during transitions, so
-        // keeping them here turns the next toggle into a native use-after-free.
-        struct ReapplyRendererIdentity {
-            std::string sourceName;
-            void* originalMesh{};
-            int sourceRootDepth{};
-            std::string rendererName;
-        };
+        using ReapplyRendererIdentity = Detail::ReapplyRendererIdentity;
 
         struct ActiveAnimationRigContext {
             void* rig{};
@@ -202,11 +195,21 @@ namespace GakumasMod::Runtime {
             // 负数 = sidecar 没提供，不要动。
             float rootWeight{ -1.0f };
             float pendulum{ -1.0f };
+            // pendulumRange = pendulum 的作用范围。530 套原版实测 84.6% 取 1.0；留 0（也就是
+            // SetDefaultValues 的值）等于把重力项乘没了 —— 骨"参数齐全"却不下垂。
+            // wind 同理，原版 84.6% 取 1.0，不写就是 0 = 不受风。负数 = sidecar 没提供、不要动。
+            float pendulumRange{ -1.0f };
+            float wind{ -1.0f };
+            int dynamicType{ -1 };   // 0=Swing 1=Slide，袖类原版用 Slide
+            // 每轴角度限位（度）。原版 88.3% 开着；不开的话摆动没有边界，容易穿模。
+            int useLimit{ -1 };
+            int limit[3][2]{};
             // 碰撞：摇物骨的 dynamicCollider 与身体骨的 staticCollider 配对。身体骨
             // (Head/Neck/Spine*/Hips/Pelvis/Left|RightArm/ForeArm/Leg) 的 staticCollider 是
             // 游戏自带的，我们只需给自己的骨一个半径；不给的话 SetDefaultValues 留下的是
             // 空碰撞体 → 手臂直接穿过裙子。radius<0 表示 sidecar 没提供、不要动。
             float colliderRadius{ -1.0f };
+            float colliderRadiusSub{ 0.05f };
             int colliderType{};
             int collisionMask{ -1 };
         };
@@ -231,6 +234,15 @@ namespace GakumasMod::Runtime {
             UnityResolve::UnityType::Quaternion localRotation{};
             UnityResolve::UnityType::Vector3 localScale{};
             std::optional<LocalIpBoneSwing> swing{};
+        };
+
+        // 一条要新建的 ActorSwingChain：挂在哪根骨上、哪些新骨是它的链根。
+        // 建不建链、按什么分组由导出器决定（见 core.build_swing_chains），运行时照单执行。
+        struct LocalIpSwingChain {
+            std::string host;
+            std::string category;
+            int chainLength{};
+            std::vector<std::string> rootBones;
         };
 
         struct ActorSwingInitialTransform {
@@ -271,6 +283,7 @@ namespace GakumasMod::Runtime {
         std::mutex g_propertyBlockSnapshotMutex;
         std::mutex g_reversiblePatchMutex;
         std::mutex g_animationRigMutex;
+        std::mutex g_pendingReapplyMutex;
         std::unordered_map<void*, std::string> g_loadHistory{};
 
         std::unordered_map<std::string, Il2CppGCHandle> g_bundleHandleMap{};
@@ -283,20 +296,14 @@ namespace GakumasMod::Runtime {
         // Names (GameObject names) of mod-created ActorSwingDynamicBone. Matched by name
         // (not pointer) because the graft runs on the loaded prefab; the game then
         // Instantiates it, so the scene clone's bones are different pointers with the
-        // same names. See AddActorSwingBonesToAnimationData.
+        // same names. See HasModBonesUnder / BuildLayersForModChains.
         std::unordered_set<std::string> g_createdActorSwingBoneNames{};
-        // 建骨时 dynamicCollider 还不存在（SetDefaultValues 不建它，它是之后由 Awake/克隆
-        // 流程建的），所以那会儿写碰撞体会被 null 检查静默跳过 —— 实测半径始终是默认的
-        // 0.05。改成在活体克隆上按骨名补写（dump 证明那时 collider 非空）。指针活不过克隆，
-        // 按名匹配是这个仓库既有的模式。
-        std::unordered_map<std::string, LocalIpBoneSwing> g_swingParamsByBoneName{};
-        // Host ActorSwingChains WE created, so a re-fired RegisterBones reuses ours instead of
-        // stacking duplicates — and, critically, so we never mistake the GAME's own chain (its
-        // skirt chain also lives on Hips) for one of ours and dump mod roots into it. Doing that
-        // makes UpdateChainInfo truncate the shared chain to the shortest member length (skirt
-        // 5 layers -> 3 when depth-3 bow roots join), which both kills the skirt's lower layers
-        // and flails the bows on a solver that isn't theirs.
-        std::unordered_set<void*> g_createdHostChains{};
+        // 上面那张集合是**进程级**的，只够用来回答"这根骨是不是某个 mod 建的"（诊断、门控）。
+        // 判断"能不能复用一根已存在的骨"必须按**归属**分开，key = modId|sidecar指纹|source：
+        // body 包和 hair 包挂在同一个角色层级下，两个 mod 也可能先后换同一个部位 —— 同名自
+        // 定义骨若只按 source 隔离，后来者会直接复用前者、跳过自己的父级/变换/物理参数。
+        // 指纹进 key 是为了原地更新（modId 不变、骨名不变、只改了 TRS/摆参/链）也不复用旧骨。
+        std::unordered_map<std::string, std::unordered_set<std::string>> g_createdBonesByOwner{};
         // Keyed by clone so a hot OFF can drop the one it just detached.  Every
         // hot ON clones the Mod mesh again (~16 MB for a 170k-vertex body), and
         // a pinned handle the runtime never releases turned each toggle into a
@@ -306,8 +313,24 @@ namespace GakumasMod::Runtime {
         std::unordered_map<void*, Il2CppGCHandle> g_runtimeMeshHandles{};
         std::vector<Il2CppGCHandle> g_runtimeBoneHandles{};
         std::vector<Il2CppGCHandle> g_runtimeMaterialHandles{};
-        std::unordered_map<void*, std::vector<void*>> g_hybridBonesByRenderer{};
+        // 缓存必须带身份：只按 renderer + 骨数量判命中的话，换成另一个骨数相同的 mod 会
+        // 直接拿到上一个 mod 的骨数组。按骨名逐个比也不够——同一个 mod 原地更新、骨名一字
+        // 未改而 TRS/摆动参数/swingChains 全变了照样命中旧缓存。ownerKey 里带的是 sidecar
+        // **全文指纹**（含 buildId），改一个字节就换一份缓存。
+        struct HybridBoneCache {
+            std::string ownerKey;
+            std::vector<void*> bones;
+        };
+        std::unordered_map<void*, HybridBoneCache> g_hybridBonesByRenderer{};
+        // 资产加载会离开主线程（见 g_runtimeMeshHandles 的注释），body 和 hair 可能并发
+        // graft —— 这些容器全是裸的 unordered_map/set/vector，同时读写是 UB。
+        std::mutex g_swingStateMutex;
         std::unordered_map<void*, std::vector<PersistentMaterialTextureOverride>> g_materialTextureOverrides{};
+
+        std::unordered_set<std::string> SnapshotCreatedActorSwingBoneNames() {
+            std::lock_guard lock(g_swingStateMutex);
+            return g_createdActorSwingBoneNames;
+        }
         std::unordered_map<void*, std::vector<RendererSlotTextureOverrides>> g_rendererTextureOverrideCache{};
         // Internal Runtime material assignments (initial apply and OFF restore)
         // must not be mistaken for the game's post-toggle write that the hook
@@ -326,6 +349,7 @@ namespace GakumasMod::Runtime {
         std::unordered_map<std::string, std::vector<ReapplyRendererIdentity>>
             g_reapplyRendererIdentities{};
         std::vector<ActiveAnimationRigContext> g_activeAnimationRigs{};
+        std::vector<Detail::PendingReapplyRequest> g_pendingReapplies{};
         Il2CppGCHandle g_propertyBlockScratchHandle{};
         UnityResolve::Method* g_rendererSetPropertyBlockMethod{};
         UnityResolve::Method* g_rendererSetPropertyBlockMaterialIndexMethod{};
@@ -339,11 +363,16 @@ namespace GakumasMod::Runtime {
         std::unordered_set<std::string> g_dumpedProfiles{};
         std::atomic_bool g_rigRegisterObserved{};
         std::atomic_bool g_nativeChainValidation{};
+        std::atomic_bool g_hasPendingReapplies{};
+        std::atomic_bool g_pendingReapplyInFlight{};
         std::unordered_set<void*> g_nativeChainAttachedRoots{};
 
         bool AttachNativeChainToLiveRoot(UnityResolve::UnityType::Transform* rootTransform);
         void RestoreRendererPropertyBlockSnapshots(void* renderer, size_t materialCount);
         void ApplyPersistentTextureOverrides(void* renderer);
+        void RetryPendingLiveReapplies(
+            const char* trigger,
+            void* observedRenderer = nullptr);
 
         std::string ToLowerAscii(std::string value) {
             std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char c) {
@@ -544,6 +573,71 @@ namespace GakumasMod::Runtime {
             return obj;
         }
 
+        // prefab 上销毁一个组件。用 DestroyImmediate —— prefab 不在场景里，Destroy 的延迟
+        // 销毁要等下一帧，而这里必须在 Instantiate 之前就把它去掉。
+        void DestroyComponentImmediate(void* component) {
+            static auto method = FindMethodByNameAndArgCount(
+                Il2cppUtils::GetClass("UnityEngine.CoreModule.dll", "UnityEngine", "Object"),
+                "DestroyImmediate", 1);
+            if (component && method) method->Invoke<void>(component);
+        }
+
+        // 按类名新建一个托管对象。`Class::address` 就是 Il2CppClass*，所以不像 CreateObjectLike
+        // 那样需要现成实例当模板 —— 这正是 dynamicCollider / limitInfo 这两个"建骨时还是 null"
+        // 的引用字段所缺的东西。
+        void* CreateManagedObject(const char* className) {
+            const auto klass = FindClassByName(className);
+            if (!klass || !klass->address) return nullptr;
+            const auto obj = UnityResolve::Invoke<void*>("il2cpp_object_new", klass->address);
+            if (!obj) return nullptr;
+            if (const auto ctor = UnityResolve::Invoke<void*>(
+                "il2cpp_class_get_method_from_name", klass->address, ".ctor", 0)) {
+                void* exc = nullptr;
+                UnityResolve::Invoke<void*>("il2cpp_runtime_invoke", ctor, obj, nullptr, &exc);
+                if (exc) return nullptr;
+            }
+            return obj;
+        }
+
+        // 往托管对象的**引用字段**写值，走 GC write barrier。
+        //
+        // 裸指针直写对 float/int 那些值类型没问题，但写引用会绕过增量 GC 的写屏障 ——
+        // GC 不知道这个新引用存在，可能在下一轮把对象回收掉，表现是跑一阵之后随机失效或崩。
+        // `il2cpp_gc_wbarrier_set_field` 拿不到时退回直写并告警：直写至少还能工作，
+        // 静默什么都不做才是最坏的。
+        void SetManagedReferenceField(void* object, std::uintptr_t fieldOffset, void* value) {
+            const auto slot = reinterpret_cast<void**>(
+                reinterpret_cast<std::uintptr_t>(object) + fieldOffset);
+            static const auto barrier = reinterpret_cast<void*>(GetProcAddress(
+                GetModuleHandleW(L"GameAssembly.dll"), "il2cpp_gc_wbarrier_set_field"));
+            if (barrier) {
+                UnityResolve::Invoke<void>("il2cpp_gc_wbarrier_set_field", object, slot, value);
+                return;
+            }
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                Log::Warn("[ModAsset] il2cpp_gc_wbarrier_set_field 不可用，托管引用改为直写"
+                    "（绕过 GC 写屏障，长时间运行可能丢引用）");
+            }
+            *slot = value;
+        }
+
+        // 取（必要时新建）某个引用字段指向的对象。
+        void* EnsureReferenceField(void* component, UnityResolve::Class* componentClass,
+            const char* fieldName, const char* className) {
+            const auto field = componentClass->Get<UnityResolve::Field>(fieldName);
+            if (!field) return nullptr;
+            const auto slot = reinterpret_cast<void**>(
+                reinterpret_cast<std::uintptr_t>(component) + field->offset);
+            if (!*slot) {
+                if (const auto created = CreateManagedObject(className)) {
+                    SetManagedReferenceField(component, field->offset, created);
+                }
+            }
+            return *slot;
+        }
+
         bool InitializeActorSwingDynamicBone(void* component, UnityResolve::Class* componentClass,
             const std::optional<LocalIpBoneSwing>& swing) {
             if (!component || !componentClass) return false;
@@ -568,14 +662,51 @@ namespace GakumasMod::Runtime {
                 setFloat("mass", swing->mass);
                 if (swing->rootWeight >= 0.0f) setFloat("rootWeight", swing->rootWeight);
                 if (swing->pendulum >= 0.0f) setFloat("pendulum", swing->pendulum);
+                if (swing->pendulumRange >= 0.0f) setFloat("pendulumRange", swing->pendulumRange);
+                if (swing->wind >= 0.0f) setFloat("wind", swing->wind);
+                if (swing->dynamicType >= 0) {
+                    if (const auto f = componentClass->Get<UnityResolve::Field>("dynamicType"))
+                        *reinterpret_cast<int*>(
+                            reinterpret_cast<std::uintptr_t>(component) + f->offset) = swing->dynamicType;
+                }
                 if (const auto f = componentClass->Get<UnityResolve::Field>("useWindGlobalForce"))
                     *reinterpret_cast<bool*>(
                         reinterpret_cast<std::uintptr_t>(component) + f->offset) = swing->useWindGlobalForce;
+
+                // dynamicCollider / limitInfo 是引用字段，SetDefaultValues 不建它们 —— 以前
+                // 因此改成在活体克隆上按**骨名**补写，那要靠一张全局 name→params 表，两个 mod
+                // 用了同名骨就会互相覆盖参数（也可能把碰巧同名的原版骨当成 mod 骨改写）。
+                // 现在自己 new 出来当场写完，那张全局表和整趟活体补写都不需要了。
+                // 布局取自 il2cpp：ActorSwingCollider = type@16 collisionMask@20 vec3_A@24
+                // vec3_B@36 float_A@48 float_B@52；LimitInfo = useLimit@16 axisX@20 axisY@28 axisZ@36。
+                if (swing->colliderRadius >= 0.0f) {
+                    if (const auto collider = EnsureReferenceField(
+                        component, componentClass, "dynamicCollider", "ActorSwingDynamicCollider")) {
+                        const auto at = reinterpret_cast<std::uintptr_t>(collider);
+                        *reinterpret_cast<int*>(at + 16) = swing->colliderType;
+                        *reinterpret_cast<int*>(at + 20) = swing->collisionMask;
+                        *reinterpret_cast<float*>(at + 48) = swing->colliderRadius;
+                        *reinterpret_cast<float*>(at + 52) = swing->colliderRadiusSub;
+                    }
+                    else {
+                        Log::Warn("[ModAsset] ActorSwing dynamicCollider unavailable; 该骨没有碰撞体");
+                    }
+                }
+                if (swing->useLimit >= 0) {
+                    if (const auto limitInfo = EnsureReferenceField(
+                        component, componentClass, "limitInfo", "LimitInfo")) {
+                        const auto at = reinterpret_cast<std::uintptr_t>(limitInfo);
+                        *reinterpret_cast<int*>(at + 16) = swing->useLimit;
+                        for (int axis = 0; axis < 3; ++axis) {
+                            *reinterpret_cast<int*>(at + 20 + axis * 8) = swing->limit[axis][0];
+                            *reinterpret_cast<int*>(at + 24 + axis * 8) = swing->limit[axis][1];
+                        }
+                    }
+                }
                 // dynamicCollider 是引用字段，SetDefaultValues 已经建好实例（护士服字段 dump
                 // 里非空），所以只填它的字段，不用自己 new。float_A=半径、float_B=次半径
                 // (真实裙摆授权 float_A 0.024~0.03 / float_B 0.05)。
                 // 碰撞体这里写不了：dynamicCollider 此刻还是 null（SetDefaultValues 不建它）。
-                // 由 ApplySwingCollider 在活体克隆上按骨名补写。
             }
 
             const ActorSwingInitialTransform initial{
@@ -599,304 +730,247 @@ namespace GakumasMod::Runtime {
         // 需给自己的骨半径和分组。不写 → 默认 mask=-1/半径0.05 → 手臂直接穿过裙子。
         //
         // 必须在**活体克隆**上写：建骨时 dynamicCollider 还是 null。
-        // 按固定 offset 直写：FindClassByName("ActorSwingDynamicCollider") 返回的类 fields 为空
-        // (实测)，Get<Field>() 一律 null。布局由 base 好碰撞体的原始字节确认，与序列化结构一致：
-        //   type@16 collisionMask@20 vector3_A@24 vector3_B@36 float_A@48 float_B@52
-        // base/LeftBackSkirt2_S 实测 = type 0 / mask 1 / float_A 0.01 / float_B 0.05。
-        size_t ApplySwingCollider(void* bone, UnityResolve::Class* dynamicBoneClass) {
-            const auto it = g_swingParamsByBoneName.find(GetUnityObjectNameString(bone));
-            if (it == g_swingParamsByBoneName.end() || it->second.colliderRadius < 0.0f) return 0;
-            const auto cf = dynamicBoneClass->Get<UnityResolve::Field>("dynamicCollider");
-            if (!cf) return 0;
-            const auto collider = *reinterpret_cast<void**>(
-                reinterpret_cast<std::uintptr_t>(bone) + cf->offset);
-            if (!collider) return 0;
-            const auto at = reinterpret_cast<std::uintptr_t>(collider);
-            *reinterpret_cast<int*>(at + 16) = it->second.colliderType;
-            *reinterpret_cast<int*>(at + 20) = it->second.collisionMask;
-            *reinterpret_cast<float*>(at + 48) = it->second.colliderRadius;
-            *reinterpret_cast<float*>(at + 52) = 0.05f;   // float_B 次半径，同 base
-            return 1;
+        // 这个角色身上有没有 mod 建的摇物骨。没有就整套后续（建层、诊断日志）都别跑：
+        // 未改装的角色走原版路径，逐层遍历它全部的链只会白白撑大日志。
+        bool HasModBonesUnder(void* rootTransform) {
+            const auto boneClass = FindClassByName("ActorSwingDynamicBone");
+            const auto rootGameObject = rootTransform
+                ? reinterpret_cast<UnityResolve::UnityType::Component*>(rootTransform)->GetGameObject()
+                : nullptr;
+            if (!boneClass || !rootGameObject || !IsNativeObjectAlive(rootGameObject)) return false;
+            const auto modBoneNames = SnapshotCreatedActorSwingBoneNames();
+            for (const auto bone : rootGameObject->GetComponentsInChildren<void*>(boneClass, true)) {
+                if (bone && IsNativeObjectAlive(bone)
+                    && modBoneNames.count(GetUnityObjectNameString(bone))) {
+                    return true;
+                }
+            }
+            return false;
         }
 
-        size_t AddActorSwingBonesToAnimationData(void* rootTransform, void* initializeData) {
-            if (!rootTransform || !initializeData) {
-                Log::Warn("[ModAsset] ActorSwing scan skipped: root or initializeData is null.");
-                return 0;
-            }
-            const auto dynamicBoneClass = FindClassByName("ActorSwingDynamicBone");
-            const auto initializeDataClass = FindClassByName("CampusActorAnimationInitializeData");
-            if (!dynamicBoneClass || !initializeDataClass) {
-                Log::WarnFmt("[ModAsset] ActorSwing scan skipped: dynamicBoneClass=%p initializeDataClass=%p",
-                    dynamicBoneClass, initializeDataClass);
-                return 0;
-            }
-
-            auto dynamicBones = initializeDataClass->GetValue<UnityResolve::UnityType::List<void*>*>(
+        // 整个 graft-时建骨方案的地基假设：ActorSwingDynamicBone 实现 IActorAnimationBone，
+        // 所以游戏自己的 CampusActorAnimation.Initialize() 会把我们长在 prefab 上的骨
+        // GetComponentsInChildren 收进 initializeData，两张并行表由它保证同长。
+        // 这行就是量它 —— mod 骨没进 swingDynamicBones 的话，参数写得再全也不会有人模拟它。
+        void LogSwingRegistrationCoverage(void* initializeData) {
+            const auto initDataClass = FindClassByName("CampusActorAnimationInitializeData");
+            if (!initDataClass || !initializeData) return;
+            const auto dynamicBones = initDataClass->GetValue<UnityResolve::UnityType::List<void*>*>(
                 initializeData, "swingDynamicBones");
-            if (!dynamicBones) {
-                Log::Warn("[ModAsset] ActorSwing scan skipped: initializeData.swingDynamicBones is null.");
-                return 0;
+            const auto initialTransforms = initDataClass->GetValue<UnityResolve::UnityType::List<void*>*>(
+                initializeData, "initialTransforms");
+            if (!dynamicBones) return;
+            const auto modBoneNames = SnapshotCreatedActorSwingBoneNames();
+            size_t mine = 0;
+            std::string missing;
+            std::unordered_set<std::string> present;
+            if (dynamicBones->pList) {
+                for (int i = 0; i < dynamicBones->size; ++i) {
+                    const auto bone = dynamicBones->pList->At(static_cast<unsigned int>(i));
+                    if (!bone) continue;
+                    const auto name = GetUnityObjectNameString(bone);
+                    if (modBoneNames.count(name)) { ++mine; present.insert(name); }
+                }
             }
+            for (const auto& name : modBoneNames) {
+                if (!present.count(name)) missing += name + " ";
+            }
+            Log::InfoFmt("[ModAsset] ActorSwing registration coverage: swingDynamicBones=%d initialTransforms=%d modBonesRegistered=%zu/%zu missing=%s",
+                dynamicBones->size, initialTransforms ? initialTransforms->size : -1,
+                mine, modBoneNames.size(),
+                missing.empty() ? "(none)" : missing.c_str());
+        }
 
-            const auto rootGameObject = reinterpret_cast<UnityResolve::UnityType::Component*>(rootTransform)
-                ->GetGameObject();
-            const auto allBones = rootGameObject && IsNativeObjectAlive(rootGameObject)
-                ? rootGameObject->GetComponentsInChildren<void*>(dynamicBoneClass, true)
-                : std::vector<void*>{};
-            Log::InfoFmt("[ModAsset] ActorSwing scan: root=%p rootGameObject=%p name=%s components=%zu dataList=%d",
-                rootTransform, rootGameObject,
-                rootGameObject ? GetUnityObjectNameString(rootGameObject).c_str() : "(null)",
-                allBones.size(), dynamicBones->size);
-            size_t added = 0;
-            for (const auto bone : allBones) {
+        // 把活体 mod 骨的字段原样读回来。建骨写的是 prefab，中间隔着 Instantiate 的深拷贝
+        // 和游戏自己的 Initialize —— 参数有没有活到这一步，只有读回来才知道，别拿"我写过"
+        // 当"它有"。hierarchyDepth 一并读：它是 0 的话这根骨在 job 里根本排不进链。
+        void LogModSwingBoneFields(void* rootTransform) {
+            const auto boneClass = FindClassByName("ActorSwingDynamicBone");
+            const auto rootGameObject = rootTransform
+                ? reinterpret_cast<UnityResolve::UnityType::Component*>(rootTransform)->GetGameObject()
+                : nullptr;
+            if (!boneClass || !rootGameObject || !IsNativeObjectAlive(rootGameObject)) return;
+            const auto modBoneNames = SnapshotCreatedActorSwingBoneNames();
+            const auto readFloat = [&](void* bone, const char* name) {
+                const auto field = boneClass->Get<UnityResolve::Field>(name);
+                return field ? *reinterpret_cast<float*>(
+                    reinterpret_cast<std::uintptr_t>(bone) + field->offset) : -999.0f;
+            };
+            for (const auto bone : rootGameObject->GetComponentsInChildren<void*>(boneClass, true)) {
                 if (!bone || !IsNativeObjectAlive(bone)) continue;
-                bool exists = false;
-                if (dynamicBones->pList) {
-                    for (int i = 0; i < dynamicBones->size; ++i) {
-                        if (dynamicBones->pList->At(static_cast<unsigned int>(i)) == bone) {
-                            exists = true;
-                            break;
-                        }
+                const auto name = GetUnityObjectNameString(bone);
+                if (!modBoneNames.count(name)) continue;
+                int depth = -1, useLimit = -1, limits[6]{};
+                if (const auto field = boneClass->Get<UnityResolve::Field>("<hierarchyDepth>k__BackingField")) {
+                    depth = *reinterpret_cast<int*>(reinterpret_cast<std::uintptr_t>(bone) + field->offset);
+                }
+                if (const auto field = boneClass->Get<UnityResolve::Field>("limitInfo")) {
+                    if (const auto limitInfo = *reinterpret_cast<void**>(
+                        reinterpret_cast<std::uintptr_t>(bone) + field->offset)) {
+                        const auto at = reinterpret_cast<std::uintptr_t>(limitInfo);
+                        useLimit = *reinterpret_cast<int*>(at + 16);
+                        for (int i = 0; i < 6; ++i) limits[i] = *reinterpret_cast<int*>(at + 20 + i * 4);
                     }
                 }
-                if (!exists && ListAddManaged(dynamicBones, bone)) {
-                    ++added;
+                float colliderRadius = -1.0f;
+                int collisionMask = 0;
+                if (const auto field = boneClass->Get<UnityResolve::Field>("dynamicCollider")) {
+                    if (const auto collider = *reinterpret_cast<void**>(
+                        reinterpret_cast<std::uintptr_t>(bone) + field->offset)) {
+                        const auto at = reinterpret_cast<std::uintptr_t>(collider);
+                        collisionMask = *reinterpret_cast<int*>(at + 20);
+                        colliderRadius = *reinterpret_cast<float*>(at + 48);
+                    }
+                }
+                Log::InfoFmt("[ModAsset] ActorSwing live bone %s: depth=%d damping=%.3f stiffness=%.4f spring=%.3f pendulum=%.4f pendulumRange=%.3f mass=%.3f wind=%.3f rootWeight=%.3f useLimit=%d limit=[%d,%d][%d,%d][%d,%d] colliderRadius=%.4f collisionMask=%d",
+                    name.c_str(), depth, readFloat(bone, "damping"), readFloat(bone, "stiffness"),
+                    readFloat(bone, "spring"), readFloat(bone, "pendulum"),
+                    readFloat(bone, "pendulumRange"), readFloat(bone, "mass"),
+                    readFloat(bone, "wind"), readFloat(bone, "rootWeight"), useLimit,
+                    limits[0], limits[1], limits[2], limits[3], limits[4], limits[5],
+                    colliderRadius, collisionMask);
+            }
+        }
+
+        // 逐层打印这个角色身上所有 ActorSwingChain 的层参数。游戏自己的裙摆链就在同一份
+        // 输出里，天然是对照组：原版裙摆层实测 around=1、radius 0.015~0.04（bundle 里授权
+        // 的序列化值），而我们的链是运行时新建的 —— UpdateChainInfo 会不会去设 around 这个
+        // 授权字段，只有读回来才知道。around=0 的链没有环形碰撞，等于白建。
+        // 给运行时新建的层补授权字段。
+        //
+        // UpdateChainInfo 只建层的**成员**（哪根骨在第几层），`active` 和 `radius` 是序列化
+        // 授权值：游戏自己的链从 bundle 反序列化出来就带着，我们运行时建的层拿到的是
+        // ChainLayerInfo() 的默认值（active=0、radius=0.05）—— active=0 基本等于这条链不被
+        // 模拟，实测我们的层全是 0 而同一帧游戏自己的层是 1。
+        //
+        // 取值来自 1539 条原版链的实测（tools/scan_vanilla_swing_bones.py）：
+        //   layer[0]  active=0 (1539/1539)  radius=0.05 (无一例外) —— 锚定层，设计上永不激活
+        //   layer[1+] active=1 (约 89%)     radius 中位逐层递增
+        // around 原版是混的（60% 关 / 40% 开），逐链手调、无规律可循，不动它。
+        // ponytail: 按层序号取中位数，够用；真要逐部件类别调再走 sidecar。
+        size_t ConfigureModChainLayers(UnityResolve::UnityType::List<void*>* layers) {
+            static constexpr float kRadiusByLayer[] = {
+                0.05f, 0.010f, 0.015f, 0.025f, 0.030f, 0.033f, 0.030f, 0.050f };
+            const auto layerClass = FindClassByName("ChainLayerInfo");
+            if (!layers || !layers->pList || !layerClass) return 0;
+            const auto activeField = layerClass->Get<UnityResolve::Field>("active");
+            const auto radiusField = layerClass->Get<UnityResolve::Field>("radius");
+            if (!activeField || !radiusField) return 0;
+
+            size_t configured = 0;
+            for (int i = 0; i < layers->size; ++i) {
+                const auto layer = layers->pList->At(static_cast<unsigned int>(i));
+                if (!layer) continue;
+                const auto at = reinterpret_cast<std::uintptr_t>(layer);
+                const auto radius = kRadiusByLayer[
+                    std::min<size_t>(static_cast<size_t>(i), std::size(kRadiusByLayer) - 1)];
+                *reinterpret_cast<bool*>(at + activeField->offset) = i > 0;
+                *reinterpret_cast<float*>(at + radiusField->offset) = radius;
+                ++configured;
+            }
+            return configured;
+        }
+
+        // 给我们建的链建层。
+        //
+        // graft 时在 prefab 上 AddComponent 建的链只有 rootBones，`chains.layers` 是空的 ——
+        // 实测日志里我们那两条 host=Hips 的链一层都没有，所以链完全没参与模拟（"改成裙摆档"
+        // 和"飘带档"表现几乎一样就是这么来的）。原以为 Instantiate 触发的 OnEnable 会建层，
+        // 那是错的：游戏自己的链在 bundle 里**就有序列化好的 layers**（active/around/radius
+        // 都是授权值），本来就不需要运行时建，OnEnable 自然也不负责。
+        //
+        // 这跟笔记里禁止的"手搭 layer"是两回事：那是自己 new ChainLayerInfo 硬凑层数，会和
+        // 游戏产出的层重复、同一根骨被模拟两次；这里是让游戏自己的 UpdateChainInfo 去建。
+        // 只碰 rootBones 里含 mod 骨、且当前没有层的链，绝不动游戏自己的。
+        size_t BuildLayersForModChains(void* rootTransform) {
+            const auto chainClass = FindClassByName("ActorSwingChain");
+            const auto chainInfoClass = FindClassByName("ChainInfo");
+            const auto rootGameObject = rootTransform
+                ? reinterpret_cast<UnityResolve::UnityType::Component*>(rootTransform)->GetGameObject()
+                : nullptr;
+            if (!chainClass || !chainInfoClass || !rootGameObject
+                || !IsNativeObjectAlive(rootGameObject)) return 0;
+            const auto updateChainInfo = chainClass->Get<UnityResolve::Method>("UpdateChainInfo");
+            if (!updateChainInfo) return 0;
+            // 先把名字集合抄一份：后台线程正在 graft 时这张表会被写，裸读是数据竞争；
+            // 而下面每轮都要调 UpdateChainInfo（托管调用），不能一直攥着锁。
+            const auto modBoneNames = SnapshotCreatedActorSwingBoneNames();
+
+            size_t built = 0;
+            for (const auto chain : rootGameObject->GetComponentsInChildren<void*>(chainClass, true)) {
+                if (!chain || !IsNativeObjectAlive(chain)) continue;
+                const auto rootBones = chainClass->GetValue<UnityResolve::UnityType::List<void*>*>(
+                    chain, "rootBones");
+                if (!rootBones || !rootBones->pList) continue;
+                bool mine = false;
+                for (int i = 0; i < rootBones->size && !mine; ++i) {
+                    mine = modBoneNames.count(
+                        GetUnityObjectNameString(rootBones->pList->At(static_cast<unsigned int>(i)))) > 0;
+                }
+                if (!mine) continue;
+                const auto chainInfo = chainClass->GetValue<void*>(chain, "chains");
+                const auto layers = chainInfo
+                    ? chainInfoClass->GetValue<UnityResolve::UnityType::List<void*>*>(chainInfo, "layers")
+                    : nullptr;
+                if (layers && layers->pList && layers->size > 0) continue;   // 已经有层，别重建
+                updateChainInfo->Invoke<void>(chain);
+                // UpdateChainInfo 可能整个换掉 ChainInfo 实例，必须重新读，别拿调用前的指针
+                // （上一版就是这么把 layers 报成 0 的，其实建出来了）。
+                const auto rebuilt = chainClass->GetValue<void*>(chain, "chains");
+                const auto after = rebuilt
+                    ? chainInfoClass->GetValue<UnityResolve::UnityType::List<void*>*>(rebuilt, "layers")
+                    : nullptr;
+                const auto configured = ConfigureModChainLayers(after);
+                Log::InfoFmt("[ModAsset] ActorSwing UpdateChainInfo on mod chain: host=%s layers=%d configured=%zu",
+                    GetUnityObjectNameString(
+                        reinterpret_cast<UnityResolve::UnityType::Component*>(chain)->GetGameObject()).c_str(),
+                    after ? after->size : -1, configured);
+                ++built;
+            }
+            return built;
+        }
+
+        void LogSwingChainLayers(void* rootTransform) {
+            const auto chainClass = FindClassByName("ActorSwingChain");
+            const auto chainInfoClass = FindClassByName("ChainInfo");
+            const auto layerClass = FindClassByName("ChainLayerInfo");
+            const auto rootGameObject = rootTransform
+                ? reinterpret_cast<UnityResolve::UnityType::Component*>(rootTransform)->GetGameObject()
+                : nullptr;
+            if (!chainClass || !chainInfoClass || !layerClass
+                || !rootGameObject || !IsNativeObjectAlive(rootGameObject)) return;
+            const auto modBoneNames = SnapshotCreatedActorSwingBoneNames();
+            for (const auto chain : rootGameObject->GetComponentsInChildren<void*>(chainClass, true)) {
+                if (!chain || !IsNativeObjectAlive(chain)) continue;
+                const auto chainInfo = chainClass->GetValue<void*>(chain, "chains");
+                const auto layers = chainInfo
+                    ? chainInfoClass->GetValue<UnityResolve::UnityType::List<void*>*>(chainInfo, "layers")
+                    : nullptr;
+                if (!layers || !layers->pList) continue;
+                const auto host = GetUnityObjectNameString(
+                    reinterpret_cast<UnityResolve::UnityType::Component*>(chain)->GetGameObject());
+                for (int i = 0; i < layers->size; ++i) {
+                    const auto layer = layers->pList->At(static_cast<unsigned int>(i));
+                    if (!layer) continue;
+                    const auto bones = layerClass->GetValue<UnityResolve::UnityType::List<void*>*>(layer, "bones");
+                    std::string first = "(none)";
+                    bool mine = false;
+                    if (bones && bones->pList && bones->size > 0) {
+                        first = GetUnityObjectNameString(bones->pList->At(0));
+                        for (int b = 0; b < bones->size && !mine; ++b) {
+                            mine = modBoneNames.count(
+                                GetUnityObjectNameString(bones->pList->At(static_cast<unsigned int>(b)))) > 0;
+                        }
+                    }
+                    Log::InfoFmt("[ModAsset] ActorSwing chain layer host=%s mod=%d layer[%d] active=%d around=%d radius=%.4f smoothing=%.4f bones=%d first=%s",
+                        host.c_str(), mine ? 1 : 0, i,
+                        layerClass->GetValue<bool>(layer, "active") ? 1 : 0,
+                        layerClass->GetValue<bool>(layer, "around") ? 1 : 0,
+                        layerClass->GetValue<float>(layer, "radius"),
+                        layerClass->GetValue<float>(layer, "smoothing"),
+                        bones ? bones->size : -1, first.c_str());
                 }
             }
-
-            if (const auto chainClass = FindClassByName("ActorSwingChain")) {
-                const auto chains = rootGameObject && IsNativeObjectAlive(rootGameObject)
-                    ? rootGameObject->GetComponentsInChildren<void*>(chainClass, true)
-                    : std::vector<void*>{};
-                // Select the current character's mod-created bones by NAME on the live
-                // instance. The graft ran on the loaded prefab, then the game Instantiated
-                // it — so pointer-based tracking (the old g_createdActorSwingBones set, and
-                // the manual Transform.GetParent walk that crashed at ModRuntime.cpp:419)
-                // never matched the scene clone. allBones is this root's live dynamic-bone
-                // snapshot; the clone preserves GameObject names, so name matching finds them.
-                std::vector<void*> currentRootCreatedBones;
-                size_t collidersApplied = 0;
-                for (const auto bone : allBones) {
-                    if (!bone || !IsNativeObjectAlive(bone)) continue;
-                    if (g_createdActorSwingBoneNames.count(GetUnityObjectNameString(bone))) {
-                        currentRootCreatedBones.emplace_back(bone);
-                        collidersApplied += ApplySwingCollider(bone, dynamicBoneClass);
-                    }
-                }
-                if (collidersApplied)
-                    Log::InfoFmt("[ModAsset] ActorSwing colliders applied: %zu/%zu",
-                        collidersApplied, currentRootCreatedBones.size());
-                // ponytail: un-modded character has no mod-created bones here — don't touch
-                // its swing chains (OnEnable/UpdateChainInfo) at all, restore vanilla behavior.
-                if (currentRootCreatedBones.empty()) return added;
-                // The mod's bones (nurse-dress ribbons/wings/stethoscope) belong to NO existing
-                // chain (topology: their roots hang off LeftShoulder/RightShoulder/Spine2, not
-                // under any base-costume swing chain). Source rui-nurs drives them with a single
-                // ActorSwingChain on Pelvis whose rootBones lists each sub-chain top. Reproduce
-                // that here: host one ActorSwingChain on Pelvis, add the mod's chain-root bones
-                // (those whose parent is NOT a dynamic bone) to its rootBones, register it into
-                // initializeData.swingChains, then UpdateChainInfo. Uses ListAddManaged because
-                // UnityResolve's List::Add faults on the un-inflated generic method.
-                std::vector<void*> chainRootBones;  // mod bones that top their own sub-chain
-                for (const auto bone : currentRootCreatedBones) {
-                    const auto transform = reinterpret_cast<UnityResolve::UnityType::Component*>(bone)->GetTransform();
-                    const auto parent = transform ? transform->GetParent() : nullptr;
-                    const auto parentGo = parent ? parent->GetGameObject() : nullptr;
-                    const bool parentDynamic = parentGo && parentGo->GetComponent<void*>(dynamicBoneClass);
-                    Log::InfoFmt("[ModAsset] ActorSwing created-bone topology: name=%s parent=%s parentDynamic=%d",
-                        GetUnityObjectNameString(bone).c_str(),
-                        parent ? GetUnityObjectNameString(parent).c_str() : "(null)", parentDynamic ? 1 : 0);
-                    if (!parentDynamic) chainRootBones.emplace_back(bone);
-                }
-
-                // Host the chain on the skeleton root. Source (偶像荣耀) names it "Pelvis";
-                // the mod grafts onto Gakumas' base skeleton whose root is "Hips" — so accept
-                // either, and fall back to the RegisterBones root GameObject so we never no-op.
-                UnityResolve::UnityType::GameObject* pelvisGo = nullptr;
-                if (!chainRootBones.empty()) {
-                    const auto t0 = reinterpret_cast<UnityResolve::UnityType::Component*>(chainRootBones.front())->GetTransform();
-                    for (auto p = t0; p && IsNativeObjectAlive(p); p = p->GetParent()) {
-                        const auto n = GetUnityObjectNameString(p);
-                        if (n == "Pelvis" || n == "Hips") { pelvisGo = p->GetGameObject(); break; }
-                    }
-                }
-                if (!pelvisGo) pelvisGo = rootGameObject;
-                // Template List type from any existing chain's rootBones (List<ActorSwingDynamicBone>).
-                void* templateRootList = nullptr;
-                for (const auto chain : chains) {
-                    if (const auto rb = chainClass->GetValue<void*>(chain, "rootBones")) { templateRootList = rb; break; }
-                }
-
-                // Walk a root's chain and return its length (bones, tip included).
-                const auto chainDepth = [&](void* root) {
-                    int depth = 0;
-                    void* bone = root;
-                    auto t = reinterpret_cast<UnityResolve::UnityType::Component*>(root)->GetTransform();
-                    while (bone && t && IsNativeObjectAlive(t)) {
-                        ++depth;
-                        UnityResolve::UnityType::Transform* next = nullptr;
-                        void* nextBone = nullptr;
-                        const int cc = t->GetChildCount();
-                        for (int i = 0; i < cc; ++i) {
-                            const auto child = t->GetChild(i);
-                            const auto go = child ? child->GetGameObject() : nullptr;
-                            if (const auto c = go ? go->GetComponent<void*>(dynamicBoneClass) : nullptr) {
-                                next = child;
-                                nextBone = c;
-                                break;
-                            }
-                        }
-                        if (!next) break;
-                        t = next;
-                        bone = nextBone;
-                    }
-                    return depth;
-                };
-                // One chain per chain-length. UpdateChainInfo gives a chain only as many layers
-                // as its SHORTEST member chain (measured: nurse 4/4/3 -> 2 layers; chisaki with
-                // 17 single-bone chains mixed in -> 1 layer, killing all 28 dress chains; after
-                // dropping those -> 7 layers). Mixing lengths therefore truncates the long chains,
-                // so group by length — every group is uniform and each chain keeps its full depth.
-                std::map<int, std::vector<void*>> rootsByDepth;
-                for (const auto root : chainRootBones) rootsByDepth[chainDepth(root)].emplace_back(root);
-                std::string groupStat;
-                for (const auto& [len, roots] : rootsByDepth)
-                    groupStat += std::to_string(roots.size()) + "x" + std::to_string(len) + " ";
-                Log::InfoFmt("[ModAsset] ActorSwing chain groups (roots x length): %s", groupStat.c_str());
-
-                // Mod chains we already put on Pelvis, in component order == creation order, so a
-                // re-fired RegisterBones reuses them instead of stacking duplicates. ONLY chains
-                // we created (g_createdHostChains) — never the game's own chain on Hips, or we
-                // truncate it (see g_createdHostChains comment).
-                std::vector<void*> existingHostChains;
-                for (const auto chain : chains) {
-                    const auto go = reinterpret_cast<UnityResolve::UnityType::Component*>(chain)->GetGameObject();
-                    if (go == pelvisGo && g_createdHostChains.count(chain)) existingHostChains.emplace_back(chain);
-                }
-
-                size_t chainRootsAdded = 0, swingChainRegistered = 0, groupIndex = 0;
-                for (const auto& [chainLen, groupRoots] : rootsByDepth) {
-                    if (!pelvisGo || !templateRootList || groupRoots.empty()) break;
-                    void* hostChain = groupIndex < existingHostChains.size()
-                        ? existingHostChains[groupIndex] : nullptr;
-                    ++groupIndex;
-                    const bool createdChain = hostChain == nullptr;
-                    if (!hostChain) hostChain = AddComponentByClass(pelvisGo, chainClass);
-                    if (hostChain && createdChain) g_createdHostChains.insert(hostChain);
-                    if (hostChain) {
-                        auto rootBones = chainClass->GetValue<void*>(hostChain, "rootBones");
-                        if (!rootBones) {
-                            rootBones = CreateObjectLike(templateRootList);
-                            if (rootBones) {
-                                if (const auto f = chainClass->Get<UnityResolve::Field>("rootBones"))
-                                    *reinterpret_cast<void**>(reinterpret_cast<std::uintptr_t>(hostChain) + f->offset) = rootBones;
-                            }
-                        }
-                        if (rootBones) {
-                            const auto rbList = reinterpret_cast<UnityResolve::UnityType::List<void*>*>(rootBones);
-                            // UpdateChainInfo (RE'd from the unpacked iOS binary; findings §9)
-                            // builds layers by walking transform.GetChild(0) from each ROOT and
-                            // requiring an ActorSwingDynamicBone component on every step — so
-                            // rootBones takes only the sub-chain tops; the rest of each chain is
-                            // discovered by that walk. (The old all-bones fill made every bone a
-                            // 1-layer chain root.)
-                            for (const auto bone : groupRoots) {
-                                bool exists = false;
-                                if (rbList->pList) {
-                                    for (int i = 0; i < rbList->size; ++i)
-                                        if (rbList->pList->At(static_cast<unsigned int>(i)) == bone) { exists = true; break; }
-                                }
-                                if (!exists && ListAddManaged(rootBones, bone)) ++chainRootsAdded;
-                            }
-                        }
-                        // Register the chain so the rig actually drives it. A reused host
-                        // (createdChain==false) from a prior RegisterBones fire may not be in
-                        // swingChains — if it isn't, the rig never drives it and its whole
-                        // chain stays active=0. So register any host not already present, not
-                        // just freshly-created ones (dedup by scanning the list first).
-                        if (const auto initDataClass = FindClassByName("CampusActorAnimationInitializeData")) {
-                            if (const auto swingChains = initDataClass->GetValue<void*>(initializeData, "swingChains")) {
-                                bool alreadyRegistered = false;
-                                if (const auto scList = reinterpret_cast<UnityResolve::UnityType::List<void*>*>(swingChains);
-                                    scList && scList->pList) {
-                                    for (int i = 0; i < scList->size; ++i)
-                                        if (scList->pList->At(static_cast<unsigned int>(i)) == hostChain) { alreadyRegistered = true; break; }
-                                }
-                                if (!alreadyRegistered && ListAddManaged(swingChains, hostChain)) ++swingChainRegistered;
-                            }
-                        }
-                        if (createdChain) {
-                            if (const auto onEnable = chainClass->Get<UnityResolve::Method>("OnEnable"))
-                                onEnable->Invoke<void>(hostChain);
-                        }
-                        // Diagnostic: which bones did UpdateChainInfo put in which layer, vs a base
-                        // chain? It omits each chain's last bone (the tip only defines the final
-                        // segment and must not be simulated), so a complete chain of depth N yields
-                        // N-1 layers.
-                        const auto layerStats = [&](void* ch) -> std::string {
-                            const auto chainInfoClass = FindClassByName("ChainInfo");
-                            const auto layerClass = FindClassByName("ChainLayerInfo");
-                            if (!chainInfoClass || !layerClass) return "n/a";
-                            const auto ci = chainClass->GetValue<void*>(ch, "chains");
-                            if (!ci) return "noChains";
-                            const auto ly = chainInfoClass->GetValue<UnityResolve::UnityType::List<void*>*>(ci, "layers");
-                            if (!ly || !ly->pList) return "noLayers";
-                            int total = 0;
-                            for (int i = 0; i < ly->size; ++i) {
-                                if (const auto layer = ly->pList->At(static_cast<unsigned int>(i)))
-                                    if (const auto bl = layerClass->GetValue<UnityResolve::UnityType::List<void*>*>(layer, "bones"))
-                                        total += bl->size;
-                            }
-                            return std::to_string(ly->size) + "layers/" + std::to_string(total) + "bones";
-                        };
-                        // Name every bone per layer: a bone appearing twice means it gets simulated
-                        // twice and the chain explodes, which is exactly what hand-built layers did.
-                        const auto layerNames = [&](void* ch) {
-                            const auto chainInfoClass = FindClassByName("ChainInfo");
-                            const auto layerClass = FindClassByName("ChainLayerInfo");
-                            const auto ci = chainInfoClass && layerClass ? chainClass->GetValue<void*>(ch, "chains") : nullptr;
-                            const auto ly = ci ? chainInfoClass->GetValue<UnityResolve::UnityType::List<void*>*>(ci, "layers") : nullptr;
-                            if (!ly || !ly->pList) return;
-                            for (int i = 0; i < ly->size; ++i) {
-                                const auto layer = ly->pList->At(static_cast<unsigned int>(i));
-                                const auto bl = layer ? layerClass->GetValue<UnityResolve::UnityType::List<void*>*>(layer, "bones") : nullptr;
-                                std::string names;
-                                if (bl && bl->pList)
-                                    for (int b = 0; b < bl->size; ++b)
-                                        names += GetUnityObjectNameString(bl->pList->At(static_cast<unsigned int>(b))) + " ";
-                                Log::InfoFmt("[ModAsset] ActorSwing layer[%d] active=%d bones=%s", i,
-                                    layer ? layerClass->GetValue<bool>(layer, "active") : 0, names.c_str());
-                            }
-                        };
-                        // UpdateChainInfo builds the layers; nothing here should touch them. It looked
-                        // broken while it produced a single layer for us, but the chains were simply
-                        // missing their tips: it omits each chain's last bone, so the tipless
-                        // Wing1->Wing2 lost Wing2 (the bone that should swing) and yielded 1 layer.
-                        // With the tips supplied it yields the expected depth-1 layers on its own.
-                        const std::string beforeStat = layerStats(hostChain);
-                        if (const auto updateInfo = chainClass->Get<UnityResolve::Method>("UpdateChainInfo")) {
-                            static bool loggedAddr = false;
-                            if (!loggedAddr) {
-                                loggedAddr = true;
-                                const auto ga = reinterpret_cast<void*>(GetModuleHandleW(L"GameAssembly.dll"));
-                                const auto ud = chainClass->Get<UnityResolve::Method>("UpdateHierarchyDepth");
-                                Log::InfoFmt("[ModAsset] ActorSwing method addrs: gaBase=%p UpdateChainInfo=%p UpdateHierarchyDepth=%p",
-                                    ga, updateInfo->function, ud ? ud->function : nullptr);
-                            }
-                            updateInfo->Invoke<void>(hostChain);
-                        }
-                        Log::InfoFmt("[ModAsset] ActorSwing chain[len=%d]: roots=%zu created=%d before=%s after=%s",
-                            chainLen, groupRoots.size(), createdChain ? 1 : 0,
-                            beforeStat.c_str(), layerStats(hostChain).c_str());
-                        if (chainLen >= 3) layerNames(hostChain);
-                    }
-                }
-                Log::InfoFmt("[ModAsset] ActorSwing new chain: pelvis=%p chainRoots=%zu groups=%zu added=%zu registered=%zu createdBones=%zu",
-                    pelvisGo, chainRootBones.size(), rootsByDepth.size(), chainRootsAdded,
-                    swingChainRegistered, currentRootCreatedBones.size());
-            }
-            return added;
         }
 
         void LogActorSwingChainStats(void* rootTransform, const char* label) {
@@ -1003,14 +1077,17 @@ namespace GakumasMod::Runtime {
             }
             RememberActiveAnimationRig(self, rootTransform, initializeData);
             const auto nativeChainAttached = AttachNativeChainToLiveRoot(rootTransform);
-            const auto added = AddActorSwingBonesToAnimationData(rootTransform, initializeData);
-            if (added) {
-                const auto dynamicBones = initializeDataClass
-                    ? initializeDataClass->GetValue<UnityResolve::UnityType::List<void*>*>(
-                        initializeData, "swingDynamicBones")
-                    : nullptr;
-                Log::InfoFmt("[ModAsset] ActorSwing data grafted before CampusActorAnimationRig.RegisterBones: added=%zu total=%d",
-                    added, dynamicBones ? dynamicBones->size : 0);
+            // 骨和链都已在 prefab 上就位，游戏自己收走了 —— 这里不再改 initializeData。
+            //
+            // 建链和补碰撞体是**互相独立**的两件事，别把后者的返回值当前者的开关：sidecar
+            // 只要没有 collider/limit 字段（或那两个引用字段当时还没建好），链就会永远停在
+            // 空层状态。各自判断自己该不该跑。
+            const auto hasModBones = HasModBonesUnder(rootTransform);
+            if (hasModBones) {
+                // 必须在 orig 之前：RegisterBones 会把各链的 layers 收进 rigData._swingChainLayers，
+                // 层是空的就等于这条链没注册进去。
+                BuildLayersForModChains(rootTransform);
+                LogSwingRegistrationCoverage(initializeData);
             }
             if (nativeChainAttached) {
                 const auto chainsAdded = AddActorSwingChainsToAnimationData(rootTransform, initializeData);
@@ -1018,9 +1095,16 @@ namespace GakumasMod::Runtime {
                     chainsAdded);
             }
             CampusActorAnimationRig_RegisterBones_Orig(self, initializeData);
+            // 未改装的角色不打这些 —— 逐层遍历原版全部链，一个角色几十上百行，
+            // 白白撑大日志还占加载期开销。
+            if (hasModBones) {
+                LogModSwingBoneFields(rootTransform);
+                LogSwingChainLayers(rootTransform);
+            }
             if (g_nativeChainValidation) {
                 LogActorSwingChainStats(rootTransform, "native");
             }
+            RetryPendingLiveReapplies("RegisterBones");
         }
 
         void LogAssetBundleLoadMethodsOnce() {
@@ -1188,10 +1272,15 @@ namespace GakumasMod::Runtime {
 
         Il2CppGCHandle LoadLocalModAssetBundle(const std::filesystem::path& bundlePath) {
             const auto normalizedPath = bundlePath.lexically_normal().string();
-            if (const auto iter = g_bundleHandleMap.find(normalizedPath); iter != g_bundleHandleMap.end()) {
-                return iter->second;
+            {
+                std::lock_guard bundleLock(g_bundleMutex);
+                if (const auto iter = g_bundleHandleMap.find(normalizedPath); iter != g_bundleHandleMap.end()) {
+                    return iter->second;
+                }
             }
 
+            // 装载走的是托管调用，会重入我们自己的 LoadAsset hook —— 锁只圈这张表，
+            // 绝不跨过装载本身。
             const auto assetBundle = LoadAssetBundleFromFile(normalizedPath);
             if (!assetBundle) {
                 Log::ErrorFmt("[ModAsset] Failed to load mod asset bundle: %s", normalizedPath.c_str());
@@ -1204,7 +1293,16 @@ namespace GakumasMod::Runtime {
                 return nullptr;
             }
 
-            g_bundleHandleMap.emplace(normalizedPath, bundleHandle);
+            {
+                // 并发装同一个包时后到的那份让路：句柄放掉，用先登记的，别把表里那条覆盖成
+                // 野句柄（两个句柄指向的是同一个 AssetBundle 对象）。
+                std::lock_guard bundleLock(g_bundleMutex);
+                const auto [iter, inserted] = g_bundleHandleMap.emplace(normalizedPath, bundleHandle);
+                if (!inserted) {
+                    UnityResolve::Invoke<void>("il2cpp_gchandle_free", bundleHandle);
+                    return iter->second;
+                }
+            }
             Log::InfoFmt("[ModAsset] Loaded mod asset bundle: %s", normalizedPath.c_str());
             return bundleHandle;
         }
@@ -1230,6 +1328,19 @@ namespace GakumasMod::Runtime {
             if (!manifest.contains("replacements") || !manifest["replacements"].is_array()) {
                 Log::ErrorFmt("[ModAsset] Manifest has no replacements array: %s", manifestPath.string().c_str());
                 return;
+            }
+
+            // sidecar 的 runtimeProtocol 一直是硬校验，mod.json 的却从来没查过 —— 导出器写它、
+            // 验证器把不等于 1 判成 error，只有运行时照单全收。写了就必须对得上；没写的是
+            // 协议号之前的老包，放行（真正的骨架契约还有 sidecar 那道硬闸）。
+            if (manifest.contains("runtimeProtocol")) {
+                constexpr int kManifestRuntimeProtocol = 1;
+                const auto& value = manifest["runtimeProtocol"];
+                if (!value.is_number_integer() || value.get<int>() != kManifestRuntimeProtocol) {
+                    Log::ErrorFmt("[ModAsset] Manifest runtimeProtocol mismatch, mod skipped: %s expected=%d",
+                        manifestPath.string().c_str(), kManifestRuntimeProtocol);
+                    return;
+                }
             }
 
             const auto manifestDir = manifestPath.parent_path();
@@ -1554,13 +1665,16 @@ namespace GakumasMod::Runtime {
             const std::string& assetName,
             const std::string& typeName) {
             const auto cacheKey = NormalizeAssetName(bundlePath + "|" + assetName + "|" + typeName);
-            if (const auto iter = g_loadedAssetHandleMap.find(cacheKey); iter != g_loadedAssetHandleMap.end()) {
-                auto cachedAsset = UnityResolve::Invoke<void*>("il2cpp_gchandle_get_target", iter->second);
-                if (cachedAsset && IsNativeObjectAlive(cachedAsset)) {
-                    return cachedAsset;
+            {
+                std::lock_guard bundleLock(g_bundleMutex);
+                if (const auto iter = g_loadedAssetHandleMap.find(cacheKey); iter != g_loadedAssetHandleMap.end()) {
+                    auto cachedAsset = UnityResolve::Invoke<void*>("il2cpp_gchandle_get_target", iter->second);
+                    if (cachedAsset && IsNativeObjectAlive(cachedAsset)) {
+                        return cachedAsset;
+                    }
+                    UnityResolve::Invoke<void>("il2cpp_gchandle_free", std::exchange(iter->second, nullptr));
+                    g_loadedAssetHandleMap.erase(iter);
                 }
-                UnityResolve::Invoke<void>("il2cpp_gchandle_free", std::exchange(iter->second, nullptr));
-                g_loadedAssetHandleMap.erase(iter);
             }
 
             const auto assetBundle = UnityResolve::Invoke<void*>("il2cpp_gchandle_get_target", bundleHandle);
@@ -1598,7 +1712,12 @@ namespace GakumasMod::Runtime {
                 return nullptr;
             }
 
-            g_loadedAssetHandleMap[cacheKey] = UnityResolve::Invoke<Il2CppGCHandle>("il2cpp_gchandle_new", modAsset, false);
+            {
+                std::lock_guard bundleLock(g_bundleMutex);
+                auto& slot = g_loadedAssetHandleMap[cacheKey];
+                if (slot) UnityResolve::Invoke<void>("il2cpp_gchandle_free", slot);
+                slot = UnityResolve::Invoke<Il2CppGCHandle>("il2cpp_gchandle_new", modAsset, false);
+            }
             Log::InfoFmt("[ModAsset] Loaded mod asset: %s type=%s result=%p resultType=%s",
                 assetName.c_str(),
                 typeName.c_str(),
@@ -1665,6 +1784,12 @@ namespace GakumasMod::Runtime {
                 obj,
                 clone);
             return clone;
+        }
+
+        bool IsRuntimeOwnedMesh(void* mesh) {
+            if (!mesh) return false;
+            std::lock_guard lock(g_runtimeMeshHandleMutex);
+            return g_runtimeMeshHandles.contains(mesh);
         }
 
         UnityArray<void*>* GetSkinnedMeshRendererBones(void* renderer) {
@@ -1976,7 +2101,8 @@ namespace GakumasMod::Runtime {
         }
 
         bool LoadIpBoneSidecar(const LocalModAssetReplacement& replacement, std::vector<LocalIpBone>& bones,
-            std::vector<LocalIpExtraBone>& extraBones) {
+            std::vector<LocalIpExtraBone>& extraBones, std::vector<LocalIpSwingChain>& swingChains,
+            std::string& fingerprint) {
             if (replacement.skeletonAssetName.empty()) return false;
 
             const auto asset = LoadLocalModAssetFromBundle(
@@ -2007,9 +2133,14 @@ namespace GakumasMod::Runtime {
                     || document["buildId"].get<std::string>().empty()) {
                     throw std::runtime_error("buildId is required for bundle/log correlation");
                 }
-                Log::InfoFmt("[ModAsset] IP skeleton sidecar protocol=%d buildId=%s source=%s",
+                // 指纹 = buildId + 全文哈希。buildId 单独不够：它是导出期算的，作者手改
+                // sidecar（或换了导出器版本而 buildId 没滚）时不动，而缓存/骨复用两处都靠
+                // 它判"还是不是同一份骨架"。
+                fingerprint = document["buildId"].get<std::string>() + "/"
+                    + std::to_string(std::hash<std::string>{}(text));
+                Log::InfoFmt("[ModAsset] IP skeleton sidecar protocol=%d buildId=%s fingerprint=%s source=%s",
                     runtimeProtocol, document["buildId"].get<std::string>().c_str(),
-                    replacement.sourceName.c_str());
+                    fingerprint.c_str(), replacement.sourceName.c_str());
                 if (!document.contains("bones") || !document["bones"].is_array()) {
                     throw std::runtime_error("bones array is required");
                 }
@@ -2028,19 +2159,48 @@ namespace GakumasMod::Runtime {
                 const auto parseSwing = [](const nlohmann::json& item) -> std::optional<LocalIpBoneSwing> {
                     if (!item.contains("swing") || !item["swing"].is_object()) return std::nullopt;
                     const auto& s = item["swing"];
+                    // 布尔位两种写法都收：游戏侧是 bool，但源模型和原版基准表统计出来的都是
+                    // 1/0。`value(key, false)` 遇到数字会抛 type_error.302，而那一抛就是
+                    // **整份 sidecar 作废、骨架 graft 整个跳过**（表现是网格没换、只有贴图
+                    // 生效）—— 一个标志位的写法不该有这种爆炸半径。
+                    const auto flag = [&s](const char* key, bool fallback) {
+                        if (!s.contains(key)) return fallback;
+                        const auto& value = s[key];
+                        if (value.is_boolean()) return value.get<bool>();
+                        if (value.is_number()) return value.get<double>() != 0.0;
+                        return fallback;
+                    };
                     LocalIpBoneSwing swing{
                         s.value("damping", 0.0f), s.value("stiffness", 0.0f),
                         s.value("spring", 0.0f), s.value("mass", 0.0f),
-                        s.value("useWindGlobalForce", false) };
+                        flag("useWindGlobalForce", false) };
                     swing.rootWeight = s.value("rootWeight", -1.0f);
                     swing.pendulum = s.value("pendulum", -1.0f);
-                    // collider 嵌在 swing 里，不是 bone 对象顶层 —— 从 item 找会永远落空、
-                    // 静默跳过写入（rootWeight 从 s 读所以一直是对的，只有 collider 中招）。
+                    swing.pendulumRange = s.value("pendulumRange", -1.0f);
+                    swing.wind = s.value("wind", -1.0f);
+                    swing.dynamicType = s.value("dynamicType", -1);
+                    swing.useLimit = s.value("useLimit", -1);
+                    const auto parseLimit = [&](const char* key, int (&out)[2]) {
+                        if (!s.contains(key) || !s[key].is_array() || s[key].size() < 2) return;
+                        out[0] = s[key][0].get<int>();
+                        out[1] = s[key][1].get<int>();
+                    };
+                    parseLimit("limitX", swing.limit[0]);
+                    parseLimit("limitY", swing.limit[1]);
+                    parseLimit("limitZ", swing.limit[2]);
+                    // 碰撞体字段平铺在 swing 对象里（导出器按原版 ActorSwingDynamicBone 的
+                    // 字段名写）。同时仍收 manifest-v2 里写过的嵌套写法
+                    // `swing.collider.{radius,type,collisionMask}` —— 只认平铺的话，按旧文档
+                    // 产出的包会**静默丢掉整套碰撞体配置**，表现是手臂穿过装饰件而日志全绿。
+                    swing.colliderRadius = s.value("colliderRadius", -1.0f);
+                    swing.colliderRadiusSub = s.value("colliderRadiusSub", 0.05f);
+                    swing.colliderType = s.value("colliderType", 0);
+                    swing.collisionMask = s.value("collisionMask", -1);
                     if (s.contains("collider") && s["collider"].is_object()) {
                         const auto& c = s["collider"];
-                        swing.colliderRadius = c.value("radius", -1.0f);
-                        swing.colliderType = c.value("type", 0);
-                        swing.collisionMask = c.value("collisionMask", -1);
+                        if (swing.colliderRadius < 0.0f) swing.colliderRadius = c.value("radius", -1.0f);
+                        if (!s.contains("colliderType")) swing.colliderType = c.value("type", 0);
+                        if (!s.contains("collisionMask")) swing.collisionMask = c.value("collisionMask", -1);
                     }
                     return swing;
                 };
@@ -2078,6 +2238,34 @@ namespace GakumasMod::Runtime {
                         extraBones.emplace_back(std::move(bone));
                     }
                 }
+
+                swingChains.clear();
+                if (document.contains("swingChains") && !document["swingChains"].is_null()) {
+                    // 容器类型错了就报错，别静默当"没有链"：导出侧验证器把它判成 error，
+                    // 运行时却照常 graft，结果是包被判坏而实机"看起来正常，只是不摆"。
+                    if (!document["swingChains"].is_array()) {
+                        throw std::runtime_error("swingChains must be an array");
+                    }
+                    for (const auto& item : document["swingChains"]) {
+                        if (!item.is_object() || !item.contains("host")
+                            || !item.contains("rootBones") || !item["rootBones"].is_array()) {
+                            throw std::runtime_error("swing chain needs host and rootBones");
+                        }
+                        LocalIpSwingChain chain{};
+                        chain.host = item["host"].get<std::string>();
+                        chain.category = item.value("category", "");
+                        // 只进日志、不参与建链。类型错了由导出侧验证器报错就够，运行时
+                        // 别为一个日志字段抛 type_error.302 把整份 sidecar 作废
+                        //（useWindGlobalForce 那次的爆炸半径见上面 parseSwing 的注释）。
+                        chain.chainLength = item.contains("chainLength")
+                            && item["chainLength"].is_number_integer()
+                            ? item["chainLength"].get<int>() : 0;
+                        for (const auto& name : item["rootBones"]) {
+                            chain.rootBones.emplace_back(name.get<std::string>());
+                        }
+                        swingChains.emplace_back(std::move(chain));
+                    }
+                }
                 return !bones.empty();
             }
             catch (const std::exception& e) {
@@ -2102,7 +2290,10 @@ namespace GakumasMod::Runtime {
             if (!rootTransform) return false;
             const auto rootGameObject = rootTransform->GetGameObject();
             if (!rootGameObject) return false;
-            if (g_nativeChainAttachedRoots.contains(rootGameObject)) return true;
+            {
+                std::lock_guard swingStateLock(g_swingStateMutex);
+                if (g_nativeChainAttachedRoots.contains(rootGameObject)) return true;
+            }
 
             const auto rendererClass = Il2cppUtils::GetClass(
                 "UnityEngine.CoreModule.dll", "UnityEngine", "SkinnedMeshRenderer");
@@ -2147,7 +2338,10 @@ namespace GakumasMod::Runtime {
                 if (!attached) return false;
                 // ponytail: the §4 probe has one attach subtree per actor; key by
                 // (root, replacement) when manifests need multiple native subtrees.
-                g_nativeChainAttachedRoots.emplace(rootGameObject);
+                {
+                    std::lock_guard swingStateLock(g_swingStateMutex);
+                    g_nativeChainAttachedRoots.emplace(rootGameObject);
+                }
                 Log::InfoFmt("[ModAsset] Attached native chain subtree to live actor: root=%s source=%s matchedMesh=%s clone=%p",
                     GetUnityObjectNameString(rootGameObject).c_str(), replacement.sourceName.c_str(),
                     GetUnityObjectNameString(matchedMesh).c_str(), subtreeClone);
@@ -2156,42 +2350,187 @@ namespace GakumasMod::Runtime {
             return false;
         }
 
+        // 按 sidecar 的 swingChains 建 ActorSwingChain —— 在 graft 时、prefab 上完成。
+        //
+        // 时机：prefab 上 AddComponent 不触发 OnEnable，游戏 Instantiate 时才触发，届时
+        // ActorSwingChain.OnEnable 自己调 UpdateChainInfo 建层；同时
+        // CampusActorAnimation.Initialize() 把链和骨（都实现 IActorAnimationBone）一起
+        // GetComponentsInChildren 收进 CampusActorAnimationInitializeData，两张并行表由它
+        // 自己保证同长。所以这里只把组件放对位置，建层/注册/初始变换全部不碰。
+        //
+        // 建不建、挂哪、怎么分组全由导出器算好（它离线可测）：530 套原版实测裙类 94% 挂链、
+        // 飘带绳结类只有 2.6%（蝴蝶结在原版里就是裸 ActorSwingDynamicBone，链多带一层
+        // around/radius 的环形碰撞解算，那是裙摆专用的）；而链必须按长度分组，否则
+        // UpdateChainInfo 会把整条链截到最短成员的长度。这里不做任何启发式。
+        size_t AttachSwingChainsToGraftedSkeleton(
+            void* originalRenderer, const std::vector<LocalIpSwingChain>& swingChains,
+            const std::unordered_map<std::string, UnityResolve::UnityType::Transform*>& graftedBones) {
+            if (swingChains.empty()) return 0;
+            const auto chainClass = FindClassByName("ActorSwingChain");
+            const auto dynamicBoneClass = FindClassByName("ActorSwingDynamicBone");
+            const auto transformClass = Il2cppUtils::GetClass(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "Transform");
+            const auto hierarchyRoot = GetHierarchyRootGameObject(originalRenderer);
+            if (!chainClass || !dynamicBoneClass || !transformClass || !hierarchyRoot) {
+                Log::WarnFmt("[ModAsset] ActorSwing chain skipped: chainClass=%p boneClass=%p root=%p",
+                    chainClass, dynamicBoneClass, hierarchyRoot);
+                return 0;
+            }
+            const auto rootGameObject = reinterpret_cast<UnityResolve::UnityType::GameObject*>(hierarchyRoot);
+
+            // 宿主骨是**游戏骨**，按名字在层级里找（游戏骨名在一个角色内唯一）。
+            std::unordered_map<std::string, UnityResolve::UnityType::GameObject*> byName;
+            for (const auto item : rootGameObject->GetComponentsInChildren<void*>(transformClass, true)) {
+                const auto gameObject = reinterpret_cast<UnityResolve::UnityType::Transform*>(item)->GetGameObject();
+                if (gameObject) byName.emplace(GetUnityObjectNameString(gameObject), gameObject);
+            }
+            // 链根只认**本次 graft 自己建/复用的那批骨**。按名字全层级找会串包：body 和 hair
+            // 各有同名新骨时，后者虽然建了独立 Transform，建链时却可能拿到先出现的前者 ——
+            // 要么被 alreadyRooted 排除掉不建链，要么建出来的链去驱动别人的骨。
+            // 已经在某条链的 rootBones 里的骨不再重复挂（同一 prefab 重复 graft、body+hair
+            // 两个 renderer 共用一套骨架时都会走到这里）。顺便借一个 List 实例当类型模板。
+            std::unordered_set<void*> alreadyRooted;
+            void* templateRootList = nullptr;
+            for (const auto chain : rootGameObject->GetComponentsInChildren<void*>(chainClass, true)) {
+                const auto rootBones = chainClass->GetValue<void*>(chain, "rootBones");
+                if (!rootBones) continue;
+                if (!templateRootList) templateRootList = rootBones;
+                const auto list = reinterpret_cast<UnityResolve::UnityType::List<void*>*>(rootBones);
+                if (!list->pList) continue;
+                for (int i = 0; i < list->size; ++i)
+                    alreadyRooted.insert(list->pList->At(static_cast<unsigned int>(i)));
+            }
+
+            size_t built = 0;
+            for (const auto& spec : swingChains) {
+                const auto host = byName.find(spec.host);
+                if (host == byName.end()) {
+                    Log::WarnFmt("[ModAsset] ActorSwing chain host not in skeleton, skipped: host=%s roots=%zu",
+                        spec.host.c_str(), spec.rootBones.size());
+                    continue;
+                }
+                std::vector<void*> roots;
+                for (const auto& name : spec.rootBones) {
+                    const auto bone = graftedBones.find(name);
+                    const auto gameObject = bone == graftedBones.end()
+                        ? nullptr : bone->second->GetGameObject();
+                    const auto component = gameObject
+                        ? gameObject->GetComponent<void*>(dynamicBoneClass) : nullptr;
+                    if (!component) {
+                        Log::WarnFmt("[ModAsset] ActorSwing chain root missing its bone, skipped: %s",
+                            name.c_str());
+                        continue;
+                    }
+                    if (!alreadyRooted.count(component)) roots.emplace_back(component);
+                }
+                if (roots.empty()) continue;
+
+                const auto chain = AddComponentByClass(host->second, chainClass);
+                if (!chain) continue;
+                auto rootBones = chainClass->GetValue<void*>(chain, "rootBones");
+                if (!rootBones && templateRootList) {
+                    rootBones = CreateObjectLike(templateRootList);
+                    if (rootBones) {
+                        if (const auto field = chainClass->Get<UnityResolve::Field>("rootBones"))
+                            SetManagedReferenceField(chain, field->offset, rootBones);
+                    }
+                }
+                size_t added = 0;
+                if (rootBones) {
+                    for (const auto bone : roots)
+                        if (ListAddManaged(rootBones, bone)) { alreadyRooted.insert(bone); ++added; }
+                }
+                // 一根都没挂上的链是空壳：它照样会被 CampusActorAnimation.Initialize() 收走、
+                // 进 rigData，然后什么也不驱动。销毁掉，别留在 prefab 上。
+                if (added == 0) {
+                    Log::ErrorFmt("[ModAsset] ActorSwing chain has no usable rootBones, destroyed: host=%s roots=%zu list=%p",
+                        spec.host.c_str(), spec.rootBones.size(), rootBones);
+                    DestroyComponentImmediate(chain);
+                    continue;
+                }
+                ++built;
+                Log::InfoFmt("[ModAsset] ActorSwing chain built on prefab: host=%s category=%s chainLength=%d roots=%zu/%zu",
+                    spec.host.c_str(), spec.category.c_str(), spec.chainLength, added, spec.rootBones.size());
+            }
+            return built;
+        }
+
         UnityArray<void*>* BuildHybridBoneArray(void* originalRenderer,
             UnityArray<void*>* originalBones,
             UnityArray<void*>* modBones,
             const std::vector<LocalIpBone>& sidecarBones,
             const std::vector<LocalIpExtraBone>& extraBones,
+            const std::vector<LocalIpSwingChain>& swingChains,
             const std::string& sourceName,
+            const std::string& modId,
+            const std::string& sidecarFingerprint,
             const size_t rendererIndex,
             size_t& matchedBones,
             size_t& createdBones,
             std::vector<void*>& createdDynamicBones) {
             if (!originalRenderer || !originalBones || !modBones || sidecarBones.size() != modBones->max_length) return nullptr;
-            if (const auto cached = g_hybridBonesByRenderer.find(originalRenderer); cached != g_hybridBonesByRenderer.end()
-                && cached->second.size() == sidecarBones.size()
-                && std::all_of(cached->second.begin(), cached->second.end(), [](const void* bone) { return bone && IsNativeObjectAlive(const_cast<void*>(bone)); })) {
-                const auto transformClass = Il2cppUtils::GetClass("UnityEngine.CoreModule.dll", "UnityEngine", "Transform");
-                if (!transformClass) return nullptr;
-                auto result = UnityArray<void*>::New(transformClass, cached->second.size());
-                for (size_t i = 0; i < cached->second.size(); ++i) result->At(static_cast<unsigned int>(i)) = cached->second[i];
-                matchedBones = 0;
-                for (const auto& bone : sidecarBones) if (BuildBoneNameIndexMap(originalBones).contains(bone.name)) ++matchedBones;
-                createdBones = sidecarBones.size() - matchedBones;
-                return result;
+            // 这根骨属于谁：同一个 mod + 同一份 sidecar + 同一个 source 才算自己人。
+            const auto ownerKey = modId + "|" + sidecarFingerprint + "|" + sourceName;
+            // 锁只圈住共享容器本身。建 GameObject / AddComponent / 建链都是托管调用，
+            // 会走回我们自己的 hook —— 在锁里做那些事既堵热路径又有重入死锁的风险。
+            std::vector<void*> cachedBones;
+            std::vector<void*> candidateBones;
+            {
+                std::lock_guard swingStateLock(g_swingStateMutex);
+                if (const auto cached = g_hybridBonesByRenderer.find(originalRenderer);
+                    cached != g_hybridBonesByRenderer.end()
+                    && cached->second.ownerKey == ownerKey) {
+                    candidateBones = cached->second.bones;
+                }
+            }
+            const auto cacheIsAlive = !candidateBones.empty()
+                && std::all_of(candidateBones.begin(), candidateBones.end(),
+                    [](void* bone) { return bone && IsNativeObjectAlive(bone); });
+            if (cacheIsAlive) {
+                cachedBones = candidateBones;
+            }
+            else if (!candidateBones.empty()) {
+                std::lock_guard swingStateLock(g_swingStateMutex);
+                if (const auto cached = g_hybridBonesByRenderer.find(originalRenderer);
+                    cached != g_hybridBonesByRenderer.end()
+                    && cached->second.ownerKey == ownerKey
+                    && cached->second.bones == candidateBones) {
+                    g_hybridBonesByRenderer.erase(cached);
+                }
             }
 
             const auto transformClass = Il2cppUtils::GetClass("UnityEngine.CoreModule.dll", "UnityEngine", "Transform");
             const auto gameObjectClass = Il2cppUtils::GetClass("UnityEngine.CoreModule.dll", "UnityEngine", "GameObject");
             if (!transformClass || !gameObjectClass) return nullptr;
-
             const auto originalBoneIndexMap = BuildBoneNameIndexMap(originalBones);
+
+            if (!cachedBones.empty()) {
+                auto result = UnityArray<void*>::New(transformClass, cachedBones.size());
+                for (size_t i = 0; i < cachedBones.size(); ++i) result->At(static_cast<unsigned int>(i)) = cachedBones[i];
+                matchedBones = 0;
+                for (const auto& bone : sidecarBones) if (originalBoneIndexMap.contains(bone.name)) ++matchedBones;
+                createdBones = sidecarBones.size() - matchedBones;
+                return result;
+            }
+
+            std::unordered_set<std::string> ownNames;
+            {
+                std::lock_guard swingStateLock(g_swingStateMutex);
+                if (const auto owned = g_createdBonesByOwner.find(ownerKey); owned != g_createdBonesByOwner.end()) {
+                    ownNames = owned->second;
+                }
+            }
             std::unordered_map<std::string, UnityResolve::UnityType::Transform*> existingCreatedBones;
             if (const auto hierarchyRoot = GetHierarchyRootGameObject(originalRenderer)) {
                 const auto hierarchyTransforms = reinterpret_cast<UnityResolve::UnityType::GameObject*>(
                     hierarchyRoot)->GetComponentsInChildren<void*>(transformClass, true);
                 for (const auto item : hierarchyTransforms) {
+                    // 死对象不能复用：mod 关掉/换场景后名字还在记录里，Transform 已经销毁，
+                    // 复用它等于把新网格蒙到一根不存在的骨上。
+                    if (!item || !IsNativeObjectAlive(item)) continue;
                     const auto name = GetUnityObjectNameString(item);
-                    if (!g_createdActorSwingBoneNames.contains(name)) continue;
+                    // 只复用**本归属自己**建过的骨；别的 mod/别的构建的同名骨要另建一根
+                    if (!ownNames.contains(name)) continue;
                     existingCreatedBones.emplace(
                         name,
                         reinterpret_cast<UnityResolve::UnityType::Transform*>(item));
@@ -2230,15 +2569,24 @@ namespace GakumasMod::Runtime {
                 transform->SetLocalPosition(localPosition);
                 transform->SetLocalRotation(localRotation);
                 transform->SetLocalScale(localScale);
+                void* dynamicBone = nullptr;
                 if (const auto dynamicBoneClass = FindClassByName("ActorSwingDynamicBone")) {
-                    const auto dynamicBone = AddComponentByClass(gameObject, dynamicBoneClass);
-                    if (dynamicBone && InitializeActorSwingDynamicBone(dynamicBone, dynamicBoneClass, swing)) {
-                        g_createdActorSwingBoneNames.emplace(name);
-                        if (swing) g_swingParamsByBoneName[name] = *swing;
-                        createdDynamicBones.emplace_back(dynamicBone);
+                    const auto component = AddComponentByClass(gameObject, dynamicBoneClass);
+                    if (component && InitializeActorSwingDynamicBone(component, dynamicBoneClass, swing)) {
+                        dynamicBone = component;
                     }
                 }
-                g_runtimeBoneHandles.emplace_back(UnityResolve::Invoke<Il2CppGCHandle>("il2cpp_gchandle_new", gameObject, false));
+                const auto handle = UnityResolve::Invoke<Il2CppGCHandle>(
+                    "il2cpp_gchandle_new", gameObject, false);
+                {
+                    std::lock_guard swingStateLock(g_swingStateMutex);
+                    if (dynamicBone) {
+                        g_createdActorSwingBoneNames.emplace(name);
+                        g_createdBonesByOwner[ownerKey].emplace(name);
+                    }
+                    g_runtimeBoneHandles.emplace_back(handle);
+                }
+                if (dynamicBone) createdDynamicBones.emplace_back(dynamicBone);
                 return transform;
             };
 
@@ -2327,7 +2675,19 @@ namespace GakumasMod::Runtime {
                     extraCreated, extraBones.size(), rendererIndex);
             }
 
-            g_hybridBonesByRenderer[originalRenderer] = hybridBones;
+            // 链在这里建：骨和 tip 都已就位，而 prefab 还没被 Instantiate。
+            // 把本次产出的骨映射直接传下去，别让它再按名字全层级找一遍。
+            auto graftedBones = extraTransforms;
+            for (size_t i = 0; i < sidecarBones.size(); ++i) {
+                graftedBones[sidecarBones[i].name] =
+                    reinterpret_cast<UnityResolve::UnityType::Transform*>(hybridBones[i]);
+            }
+            AttachSwingChainsToGraftedSkeleton(originalRenderer, swingChains, graftedBones);
+
+            {
+                std::lock_guard swingStateLock(g_swingStateMutex);
+                g_hybridBonesByRenderer[originalRenderer] = { ownerKey, hybridBones };
+            }
             auto result = UnityArray<void*>::New(transformClass, hybridBones.size());
             for (size_t i = 0; i < hybridBones.size(); ++i) result->At(static_cast<unsigned int>(i)) = hybridBones[i];
             return result;
@@ -2420,7 +2780,10 @@ namespace GakumasMod::Runtime {
         bool TransformModMeshVerticesToOriginalRendererSpace(void* originalRenderer, void* modRenderer, void* modMesh,
             const std::string& sourceName, const size_t rendererIndex) {
             if (!originalRenderer || !modRenderer || !modMesh) return false;
-            if (g_transformedMeshSet.contains(modMesh)) return true;
+            {
+                std::lock_guard meshLock(g_runtimeMeshHandleMutex);
+                if (g_transformedMeshSet.contains(modMesh)) return true;
+            }
 
             const auto originalTransform = GetComponentTransform(originalRenderer);
             const auto modTransform = GetComponentTransform(modRenderer);
@@ -2477,7 +2840,10 @@ namespace GakumasMod::Runtime {
 
             SetMeshVertices(modMesh, vertices);
             RecalculateMeshBounds(modMesh);
-            g_transformedMeshSet.emplace(modMesh);
+            {
+                std::lock_guard meshLock(g_runtimeMeshHandleMutex);
+                g_transformedMeshSet.emplace(modMesh);
+            }
             Log::InfoFmt("[ModAsset] Transformed mod mesh vertices to original renderer space: %s renderer=%zu vertices=%zu normals=%zu tangents=%zu originalRenderer=\"%s\" modRenderer=\"%s\"",
                 sourceName.c_str(),
                 rendererIndex,
@@ -2510,7 +2876,10 @@ namespace GakumasMod::Runtime {
 
             std::vector<LocalIpBone> sidecarBones;
             std::vector<LocalIpExtraBone> extraSwingBones;
-            if (!LoadIpBoneSidecar(replacement, sidecarBones, extraSwingBones) || sidecarBones.size() != modBones->max_length) {
+            std::vector<LocalIpSwingChain> swingChains;
+            std::string sidecarFingerprint;
+            if (!LoadIpBoneSidecar(replacement, sidecarBones, extraSwingBones, swingChains, sidecarFingerprint)
+                || sidecarBones.size() != modBones->max_length) {
                 Log::ErrorFmt("[ModAsset] Lossless IP skeleton sidecar count mismatch: %s renderer=%zu sidecar=%zu modBones=%zu",
                     sourceName.c_str(), rendererIndex, sidecarBones.size(), static_cast<size_t>(modBones->max_length));
                 return false;
@@ -2547,7 +2916,8 @@ namespace GakumasMod::Runtime {
             size_t createdBones = 0;
             std::vector<void*> createdDynamicBones;
             const auto hybridBones = BuildHybridBoneArray(
-                originalRenderer, originalBones, modBones, sidecarBones, extraSwingBones, sourceName, rendererIndex,
+                originalRenderer, originalBones, modBones, sidecarBones, extraSwingBones, swingChains,
+                sourceName, replacement.modId, sidecarFingerprint, rendererIndex,
                 matchedBones, createdBones, createdDynamicBones);
             if (!hybridBones) return false;
 
@@ -3615,7 +3985,10 @@ namespace GakumasMod::Runtime {
                 g_runtimeMeshHandles.erase(iter);
             }
             if (handle) UnityResolve::Invoke<void>("il2cpp_gchandle_free", handle);
-            g_transformedMeshSet.erase(mesh);
+            {
+                std::lock_guard meshLock(g_runtimeMeshHandleMutex);
+                g_transformedMeshSet.erase(mesh);
+            }
 
             // Freeing the handle only lets the managed wrapper go.  A Mesh is a
             // native Unity object: its vertex/skin arrays stay allocated until
@@ -3688,6 +4061,19 @@ namespace GakumasMod::Runtime {
         }
 
         size_t RestoreLiveModInstances(const std::string& modId) {
+            // OFF 之后 renderer 的骨数组已经被还原，缓存里那份混合骨数组就是过期的：
+            // 留着它，同一个 mod 原地更新后再 ON 会直接命中旧构建的骨。
+            // 骨归属记录（g_createdBonesByOwner）**故意保留**：它只是一张"这个名字的骨是我
+            // 建的"过滤表，key 里带 modId+指纹，别的 mod 撞不上；清掉反而会让 ON→OFF→ON
+            // 每轮都重新建一套同名骨、在层级里越堆越多。骨已销毁的情况由复用处的存活检查兜。
+            {
+                std::lock_guard swingStateLock(g_swingStateMutex);
+                const auto prefix = modId + "|";
+                for (auto iter = g_hybridBonesByRenderer.begin(); iter != g_hybridBonesByRenderer.end();) {
+                    iter = iter->second.ownerKey.starts_with(prefix)
+                        ? g_hybridBonesByRenderer.erase(iter) : std::next(iter);
+                }
+            }
             std::vector<ReversibleRendererPatch> patches;
             {
                 std::lock_guard lock(g_reversiblePatchMutex);
@@ -3721,16 +4107,7 @@ namespace GakumasMod::Runtime {
                         patch.sourceRootDepth,
                         patch.rendererName,
                     };
-                    const auto duplicate = std::find_if(
-                        identities.begin(),
-                        identities.end(),
-                        [&identity](const auto& existing) {
-                            return existing.sourceName == identity.sourceName
-                                && existing.originalMesh == identity.originalMesh
-                                && existing.sourceRootDepth == identity.sourceRootDepth
-                                && existing.rendererName == identity.rendererName;
-                        });
-                    if (duplicate == identities.end()) identities.push_back(identity);
+                    Detail::RememberReapplyRendererIdentity(identities, identity);
                 }
             }
 
@@ -4056,26 +4433,6 @@ namespace GakumasMod::Runtime {
             return true;
         }
 
-        // 2026-08-09, Player.log: the game's RegisterBones throws
-        // ArgumentOutOfRangeException when a live actor gained swing bones this
-        // way.  The managed exception unwinds straight through these native
-        // frames, so the toggle used to be abandoned mid-flight -- no renderer
-        // reactivation, no persistence, and a catalog that disagreed with the
-        // runtime on the next click (the second toggle then reported
-        // changed=0 hotInstances=0 while the Mod was in fact applied).
-        // ponytail: SEH, because this project builds without C++ exceptions.
-        // Containing it is not a fix for the throw itself -- a bundle whose
-        // swing chains have no tip bone still leaves them unregistered.
-        bool RegisterRigBonesGuarded(void* rig, void* initializeData) {
-            __try {
-                CampusActorAnimationRig_RegisterBones_Orig(rig, initializeData);
-                return true;
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER) {
-                return false;
-            }
-        }
-
         // Do not call CampusActorModelParts.InitializeCampusMaterials() on a
         // live actor to refresh derived material state.  2026-08-09: it replaced
         // the renderer's whole material array with materials whose shader has
@@ -4107,38 +4464,28 @@ namespace GakumasMod::Runtime {
                 }
                 if (matchingTargets.empty()) continue;
 
-                const auto addedBones = AddActorSwingBonesToAnimationData(
-                    context.rootTransform, context.initializeData);
-                const auto addedChains = AddActorSwingChainsToAnimationData(
-                    context.rootTransform, context.initializeData);
-                if ((addedBones > 0 || addedChains > 0)
-                    && !RegisterRigBonesGuarded(context.rig, context.initializeData)) {
-                    Log::ErrorFmt(
-                        "[ModAsset] CampusActorAnimationRig.RegisterBones threw during hot reapply; swing bones stay unregistered: root=%s addedBones=%zu addedChains=%zu",
-                        GetUnityObjectNameString(context.rootGameObject).c_str(),
-                        addedBones,
-                        addedChains);
-                }
-
+                // 摇物骨和链是 graft 时长在 prefab 上、由游戏 Instantiate 后自己收走的，
+                // 热切换够不着那一步：这里只刷新网格/材质并补碰撞体。新增摇物链要生效必须
+                // 重新进场景。（以前这里往 initializeData 追加再重跑 RegisterBones，结果是
+                // 并行表失衡抛异常，摆动一样没有，还得靠 SEH 兜住换装开关。）
                 size_t reactivatedTargets = 0;
                 for (const auto target : matchingTargets) {
                     if (ReactivateGameObject(target)) ++reactivatedTargets;
                 }
-                if (reactivatedTargets > 0 || addedBones > 0 || addedChains > 0) {
+                if (reactivatedTargets > 0) {
                     ++refreshed;
                     Log::InfoFmt(
-                        "[ModAsset] Hot-refreshed active character target: root=%s reactivatedTargets=%zu addedBones=%zu addedChains=%zu",
+                        "[ModAsset] Hot-refreshed active character target: root=%s reactivatedTargets=%zu (新增摇物链需重新进入场景)",
                         GetUnityObjectNameString(context.rootGameObject).c_str(),
-                        reactivatedTargets,
-                        addedBones,
-                        addedChains);
+                        reactivatedTargets);
                 }
             }
             return refreshed;
         }
 
         std::vector<void*> CollectLiveReapplyTargets(
-            const LocalModAssetReplacement& replacement) {
+            const LocalModAssetReplacement& replacement,
+            void* observedRenderer = nullptr) {
             std::vector<void*> targets;
             std::vector<ReapplyRendererIdentity> identities;
             {
@@ -4161,11 +4508,10 @@ namespace GakumasMod::Runtime {
             // Resolve only against the current renderer snapshot.  The previous
             // implementation walked GameObjects retained from earlier scenes;
             // IsNativeObjectAlive was not enough to make that raw pointer safe.
-            const auto liveRenderers = rendererClass->FindObjectsByType<void*>();
-            for (const auto renderer : liveRenderers) {
-                if (!renderer || !IsNativeObjectAlive(renderer)) continue;
+            const auto tryCollect = [&](void* renderer) {
+                if (!renderer || !IsNativeObjectAlive(renderer)) return;
                 const auto mesh = GetSkinnedMeshRendererSharedMesh(renderer);
-                if (!mesh) continue;
+                if (!mesh) return;
                 const auto rendererName = GetUnityObjectNameString(renderer);
                 const auto identity = std::find_if(
                     identities.begin(),
@@ -4175,15 +4521,28 @@ namespace GakumasMod::Runtime {
                             && (current.rendererName.empty()
                                 || current.rendererName == rendererName);
                     });
-                if (identity == identities.end()) continue;
+                if (identity == identities.end()) return;
                 AddUniqueLiveObject(
                     targets,
                     GetSourceRootGameObject(renderer, identity->sourceRootDepth));
+            };
+
+            // Renderer lifecycle hooks can hand us a current, valid renderer
+            // before FindObjectsByType starts returning inactive/initializing
+            // scene objects.  It is safe to inspect for this call only; it is
+            // never retained in the pending queue.
+            tryCollect(observedRenderer);
+            const auto liveRenderers = rendererClass->FindObjectsByType<void*>();
+            for (const auto renderer : liveRenderers) {
+                tryCollect(renderer);
             }
             return targets;
         }
 
-        size_t ReapplyLiveModInstances(LocalModAssetReplacement& replacement) {
+        size_t ReapplyLiveModInstances(
+            LocalModAssetReplacement& replacement,
+            const bool refreshAnimationRigs = true,
+            void* observedRenderer = nullptr) {
             if (replacement.replaceWholeObject || replacement.attachToOriginal) {
                 Log::WarnFmt(
                     "[ModAsset] Hot reapply unsupported for whole-object/attach rule: mod=%s source=%s",
@@ -4192,7 +4551,8 @@ namespace GakumasMod::Runtime {
                 return 0;
             }
 
-            const auto targets = CollectLiveReapplyTargets(replacement);
+            const auto targets = CollectLiveReapplyTargets(
+                replacement, observedRenderer);
             if (targets.empty()) return 0;
             const auto modAsset = LoadLocalModReplacementAsset(replacement);
             if (!modAsset) return 0;
@@ -4206,7 +4566,9 @@ namespace GakumasMod::Runtime {
                     target,
                     GetUnityObjectNameString(target).c_str());
             }
-            const auto refreshedRigs = RefreshAnimationRigsAfterHotReapply(targets);
+            const auto refreshedRigs = refreshAnimationRigs
+                ? RefreshAnimationRigsAfterHotReapply(targets)
+                : 0;
             Log::InfoFmt(
                 "[ModAsset] Hot reapply finished: mod=%s source=%s targets=%zu applied=%zu refreshedRigs=%zu",
                 replacement.modId.c_str(),
@@ -4215,6 +4577,131 @@ namespace GakumasMod::Runtime {
                 applied,
                 refreshedRigs);
             return applied;
+        }
+
+        void QueuePendingLiveReapply(
+            const std::string& modId,
+            const std::string& sourceName) {
+            const auto sourceKey = NormalizeAssetName(sourceName);
+            bool queued = false;
+            {
+                std::lock_guard lock(g_pendingReapplyMutex);
+                queued = Detail::QueuePendingReapply(
+                    g_pendingReapplies, modId, sourceKey);
+                g_hasPendingReapplies.store(!g_pendingReapplies.empty());
+            }
+            if (queued) {
+                Log::InfoFmt(
+                    "[ModAsset] Deferred hot reapply queued: mod=%s source=%s",
+                    modId.c_str(), sourceName.c_str());
+            }
+        }
+
+        void ClearPendingLiveReapply(
+            const std::string& modId,
+            const std::string& sourceName) {
+            std::lock_guard lock(g_pendingReapplyMutex);
+            Detail::ClearPendingReapply(
+                g_pendingReapplies, modId, NormalizeAssetName(sourceName));
+            g_hasPendingReapplies.store(!g_pendingReapplies.empty());
+        }
+
+        void ClearPendingLiveReappliesForMod(const std::string& modId) {
+            std::lock_guard lock(g_pendingReapplyMutex);
+            Detail::ClearPendingReappliesForMod(g_pendingReapplies, modId);
+            g_hasPendingReapplies.store(!g_pendingReapplies.empty());
+        }
+
+        std::vector<void*> SnapshotPatchedMeshes(
+            const Detail::PendingReapplyRequest& request) {
+            std::vector<void*> patchedMeshes;
+            std::lock_guard patchLock(g_reversiblePatchMutex);
+            for (const auto& patch : g_reversibleRendererPatches) {
+                if (patch.modId == request.modId
+                    && NormalizeAssetName(patch.sourceName) == request.sourceKey
+                    && patch.patchedMesh) {
+                    patchedMeshes.push_back(patch.patchedMesh);
+                }
+            }
+            return patchedMeshes;
+        }
+
+        bool HasLivePatchedRenderer(
+            const Detail::PendingReapplyRequest& request,
+            void* observedRenderer) {
+            const auto patchedMeshes = SnapshotPatchedMeshes(request);
+            if (patchedMeshes.empty()) return false;
+
+            const auto rendererClass = Il2cppUtils::GetClass(
+                "UnityEngine.CoreModule.dll", "UnityEngine", "SkinnedMeshRenderer");
+            if (!rendererClass) return false;
+            const auto matchesPatchedMesh = [&](void* renderer) {
+                if (!renderer || !IsNativeObjectAlive(renderer)) return false;
+                const auto mesh = GetSkinnedMeshRendererSharedMesh(renderer);
+                return std::find(patchedMeshes.begin(), patchedMeshes.end(), mesh)
+                    != patchedMeshes.end();
+            };
+            if (matchesPatchedMesh(observedRenderer)) return true;
+            for (const auto renderer : rendererClass->FindObjectsByType<void*>()) {
+                if (matchesPatchedMesh(renderer)) return true;
+            }
+            return false;
+        }
+
+        void RetryPendingLiveReapplies(
+            const char* trigger,
+            void* observedRenderer) {
+            if (!g_hasPendingReapplies.load()) return;
+            // 触发点里有 Renderer.SetPropertyBlock —— 那是**逐帧逐 renderer**的调用，而每次
+            // 重试都要 FindObjectsByType 扫全场景。一条永远满足不了的请求（在主页开一个当前
+            // 不在场景里的 mod，很常见）会因此把全场景扫描摊到每一帧。节流到 250ms 一次：
+            // 能满足它的是"角色出现"这种秒级事件，晚一拍没有代价。
+            // ponytail: 时间闸够用；要更准就改成只挂角色生命周期 hook。
+            using Clock = std::chrono::steady_clock;
+            static std::atomic<Clock::rep> lastAttempt{};
+            static const auto minInterval = std::chrono::duration_cast<Clock::duration>(
+                std::chrono::milliseconds(250)).count();
+            const auto now = Clock::now().time_since_epoch().count();
+            auto previous = lastAttempt.load();
+            if (previous != 0 && now - previous < minInterval) return;
+            if (!lastAttempt.compare_exchange_strong(previous, now)) return;
+            if (g_pendingReapplyInFlight.exchange(true)) return;
+            // 中途 return / 抛出都要把在飞标志放掉，否则整个进程再也不会重试。
+            struct InFlightGuard {
+                ~InFlightGuard() { g_pendingReapplyInFlight.store(false); }
+            } inFlightGuard;
+
+            std::vector<Detail::PendingReapplyRequest> requests;
+            {
+                std::lock_guard lock(g_pendingReapplyMutex);
+                requests = g_pendingReapplies;
+            }
+            for (const auto& request : requests) {
+                const auto replacement = FindLocalModAssetReplacement(request.sourceKey);
+                if (!replacement || replacement->modId != request.modId) {
+                    ClearPendingLiveReapply(request.modId, request.sourceKey);
+                    continue;
+                }
+
+                // This retry runs from an actor/renderer lifecycle callback.  The
+                // object is already being initialized, so toggling its whole root
+                // inactive here would re-enter the callback.  The mesh path still
+                // refreshes the renderer and bounds itself.
+                const auto applied = ReapplyLiveModInstances(
+                    *replacement, false, observedRenderer);
+                const auto alreadyPatched = applied == 0
+                    && HasLivePatchedRenderer(request, observedRenderer);
+                if (applied > 0 || alreadyPatched) {
+                    ClearPendingLiveReapply(request.modId, request.sourceKey);
+                    Log::InfoFmt(
+                        "[ModAsset] Deferred hot reapply satisfied: trigger=%s mod=%s source=%s applied=%zu alreadyPatched=%d",
+                        trigger ? trigger : "unknown",
+                        request.modId.c_str(),
+                        replacement->sourceName.c_str(),
+                        applied,
+                        alreadyPatched ? 1 : 0);
+                }
+            }
         }
 
         // A Mod that was off when the game started has never been applied, so the
@@ -4255,29 +4742,39 @@ namespace GakumasMod::Runtime {
                 originalAsset)->GetComponentsInChildren<void*>(rendererClass, true);
             if (renderers.empty()) return;
 
+            struct ObservedRendererIdentity {
+                void* mesh{};
+                int sourceRootDepth{};
+                std::string rendererName;
+            };
+            std::vector<ObservedRendererIdentity> observed;
+            observed.reserve(renderers.size());
+            for (const auto renderer : renderers) {
+                const auto mesh = GetSkinnedMeshRendererSharedMesh(renderer);
+                // A cached prefab may pass through this hook again after an
+                // in-place replacement.  Recording our clone as "original"
+                // would make the next ON target an already-patched renderer.
+                if (!mesh || IsRuntimeOwnedMesh(mesh)) continue;
+                observed.push_back({
+                    mesh,
+                    GetComponentDepthFromRoot(renderer, originalAsset),
+                    GetUnityObjectNameString(renderer),
+                });
+            }
+            if (observed.empty()) return;
+
             std::lock_guard lock(g_reversiblePatchMutex);
             for (const auto& replacement : candidates) {
                 auto& identities = g_reapplyRendererIdentities[replacement->modId];
-                for (const auto renderer : renderers) {
-                    const auto mesh = GetSkinnedMeshRendererSharedMesh(renderer);
-                    if (!mesh) continue;
+                for (const auto& current : observed) {
                     const ReapplyRendererIdentity identity{
                         replacement->sourceName,
-                        mesh,
-                        GetComponentDepthFromRoot(renderer, originalAsset),
-                        GetUnityObjectNameString(renderer),
+                        current.mesh,
+                        current.sourceRootDepth,
+                        current.rendererName,
                     };
-                    // Only the first load sees the untouched prefab: once this
-                    // runtime has patched it in place, its mesh is the Mod's.
-                    const auto duplicate = std::find_if(
-                        identities.begin(),
-                        identities.end(),
-                        [&identity](const auto& existing) {
-                            return existing.sourceName == identity.sourceName
-                                && existing.rendererName == identity.rendererName;
-                        });
-                    if (duplicate != identities.end()) continue;
-                    identities.push_back(identity);
+                    if (!Detail::RememberReapplyRendererIdentity(
+                            identities, identity)) continue;
                     Log::InfoFmt(
                         "[ModAsset] Remembered hot-reapply identity: mod=%s source=%s renderer=\"%s\" mesh=%p depth=%d",
                         replacement->modId.c_str(),
@@ -4389,7 +4886,10 @@ namespace GakumasMod::Runtime {
                 const auto assetName = name->ToString();
                 LogAssetTrace("AssetBundle.LoadAssetAsync_Internal", assetName, result, type);
                 std::lock_guard lock(g_historyMutex);
-                g_loadHistory.emplace(result, assetName);
+                // 必须覆盖：request 指针会被复用，而 emplace 遇到已存在的 key 是**不写**的
+                // —— 上一条没被消费掉的记录会让新请求顶着旧资源名走替换。
+                // ponytail: 没人消费的记录只增不减（每条约百字节），真涨起来再加上限。
+                g_loadHistory.insert_or_assign(result, assetName);
             }
             return result;
         }
@@ -4735,6 +5235,10 @@ namespace GakumasMod::Runtime {
         void Renderer_SetPropertyBlock_Hook(void* self, void* properties, void* methodInfo) {
             Renderer_SetPropertyBlock_Orig(self, properties, methodInfo);
             ApplyPersistentTextureOverrides(self);
+            RetryPendingLiveReapplies(
+                "Renderer.SetPropertyBlock",
+                std::strcmp(GetUnityObjectClassName(self), "SkinnedMeshRenderer") == 0
+                    ? self : nullptr);
         }
 
         void Renderer_SetPropertyBlockMaterialIndex_Hook(
@@ -4752,6 +5256,10 @@ namespace GakumasMod::Runtime {
                 ApplyPersistentTextureOverridesToSlot(
                     self, *iter, false, true);
             }
+            RetryPendingLiveReapplies(
+                "Renderer.SetPropertyBlock(materialIndex)",
+                std::strcmp(GetUnityObjectClassName(self), "SkinnedMeshRenderer") == 0
+                    ? self : nullptr);
         }
 
         // Last unexamined writer for "hot reapply looks wrong until a page
@@ -4900,6 +5408,8 @@ namespace GakumasMod::Runtime {
         }
 
         void* Renderer_SetSharedMaterials_Hook(void* self, void* value, void* methodInfo) {
+            const auto externalAssignment = !t_internalMaterialAssignment
+                && !t_restoringMaterials;
             // Prime the per-renderer cache while the Mod material array is still
             // installed; after the game's setter runs, the array contains the
             // original materials and a fresh scan would lose the evidence.
@@ -4907,14 +5417,28 @@ namespace GakumasMod::Runtime {
             const auto result = Renderer_SetSharedMaterials_Orig(self, value, methodInfo);
             RestorePatchedMaterials(
                 self, value, "set_sharedMaterials", Renderer_SetSharedMaterials_Orig);
+            if (externalAssignment) {
+                RetryPendingLiveReapplies(
+                    "Renderer.set_sharedMaterials",
+                    std::strcmp(GetUnityObjectClassName(self), "SkinnedMeshRenderer") == 0
+                        ? self : nullptr);
+            }
             return result;
         }
 
         void* Renderer_SetMaterials_Hook(void* self, void* value, void* methodInfo) {
+            const auto externalAssignment = !t_internalMaterialAssignment
+                && !t_restoringMaterials;
             (void)CollectRendererTextureOverrides(self);
             const auto result = Renderer_SetMaterials_Orig(self, value, methodInfo);
             RestorePatchedMaterials(
                 self, value, "set_materials", Renderer_SetMaterials_Orig);
+            if (externalAssignment) {
+                RetryPendingLiveReapplies(
+                    "Renderer.set_materials",
+                    std::strcmp(GetUnityObjectClassName(self), "SkinnedMeshRenderer") == 0
+                        ? self : nullptr);
+            }
             return result;
         }
 
@@ -5080,6 +5604,12 @@ namespace GakumasMod::Runtime {
                     reinterpret_cast<void*>(Material_SetTextureString_Hook),
                     &Material_SetTextureString_Orig);
             }
+            else {
+                // 以前这里没有 else：解析失败就静默跳过上面四个 hook 且 ok 仍是 true，
+                // 表现是贴图覆盖整个失效而日志全绿。
+                Log::Error("[ModAsset] Persistent material texture override methods unavailable.");
+                ok = false;
+            }
 
             // Reapply the complete Mod material array after the game writes its
             // original array back to a renderer during a hot toggle.
@@ -5100,7 +5630,7 @@ namespace GakumasMod::Runtime {
                     &Renderer_SetMaterials_Orig);
             }
             else {
-                Log::Error("[ModAsset] Persistent material texture override methods unavailable.");
+                Log::Error("[ModAsset] Renderer.set_materials unavailable; the game can take the mod material array back on a hot toggle.");
                 ok = false;
             }
             return ok;
@@ -5238,10 +5768,22 @@ namespace GakumasMod::Runtime {
                 if (!replacement) continue;
                 const auto sourceKey = NormalizeAssetName(replacement->sourceName);
                 if (!reappliedSources.emplace(sourceKey).second) continue;
-                affectedInstances += ReapplyLiveModInstances(*replacement);
+                const auto applied = ReapplyLiveModInstances(*replacement);
+                affectedInstances += applied;
+                if (applied == 0
+                    && !replacement->replaceWholeObject
+                    && !replacement->attachToOriginal) {
+                    QueuePendingLiveReapply(
+                        replacement->modId, replacement->sourceName);
+                }
+                else if (applied > 0) {
+                    ClearPendingLiveReapply(
+                        replacement->modId, replacement->sourceName);
+                }
             }
         }
         else if (stateChanged) {
+            ClearPendingLiveReappliesForMod(modIdUtf8);
             affectedInstances = RestoreLiveModInstances(modIdUtf8);
         }
 
@@ -5338,6 +5880,55 @@ namespace GakumasMod::Runtime {
             if (handle) UnityResolve::Invoke<void>("il2cpp_gchandle_free", handle);
         }
         g_runtimeMaterialHandles.clear();
+        std::vector<Il2CppGCHandle> runtimeBoneHandles;
+        {
+            // 建骨那条路的全部状态：GC 句柄要放（否则每次卸载/重载插件都钉住一批
+            // GameObject），三张表要清（下一轮 Initialize 会重新登记）。
+            std::lock_guard lock(g_swingStateMutex);
+            runtimeBoneHandles.swap(g_runtimeBoneHandles);
+            g_createdActorSwingBoneNames.clear();
+            g_createdBonesByOwner.clear();
+            g_hybridBonesByRenderer.clear();
+            g_nativeChainAttachedRoots.clear();
+        }
+        for (const auto handle : runtimeBoneHandles) {
+            if (handle) UnityResolve::Invoke<void>("il2cpp_gchandle_free", handle);
+        }
+        {
+            // 资源装载那条路的句柄同样是钉住托管对象的，卸载不放就是泄漏。
+            std::lock_guard lock(g_bundleMutex);
+            for (const auto& [path, handle] : g_bundleHandleMap) {
+                (void)path;
+                if (handle) UnityResolve::Invoke<void>("il2cpp_gchandle_free", handle);
+            }
+            g_bundleHandleMap.clear();
+            for (const auto& [key, handle] : g_loadedAssetHandleMap) {
+                (void)key;
+                if (handle) UnityResolve::Invoke<void>("il2cpp_gchandle_free", handle);
+            }
+            g_loadedAssetHandleMap.clear();
+        }
+        {
+            std::lock_guard lock(g_runtimeMeshHandleMutex);
+            for (const auto& [mesh, handle] : g_runtimeMeshHandles) {
+                (void)mesh;
+                if (handle) UnityResolve::Invoke<void>("il2cpp_gchandle_free", handle);
+            }
+            g_runtimeMeshHandles.clear();
+            g_transformedMeshSet.clear();
+        }
+        {
+            std::lock_guard lock(g_historyMutex);
+            g_loadHistory.clear();
+        }
+        {
+            // 两个原子标志也要回位：inFlight 停在 true 的话，重新 Initialize 之后
+            // 这一轮的重试会被永久挡在门外。
+            std::lock_guard lock(g_pendingReapplyMutex);
+            g_pendingReapplies.clear();
+        }
+        g_hasPendingReapplies.store(false);
+        g_pendingReapplyInFlight.store(false);
         {
             std::lock_guard lock(g_materialOverrideMutex);
             g_materialTextureOverrides.clear();
@@ -5355,6 +5946,12 @@ namespace GakumasMod::Runtime {
         {
             std::lock_guard lock(g_animationRigMutex);
             g_activeAnimationRigs.clear();
+        }
+        {
+            std::lock_guard lock(g_pendingReapplyMutex);
+            g_pendingReapplies.clear();
+            g_hasPendingReapplies.store(false);
+            g_pendingReapplyInFlight.store(false);
         }
         Log::Info("[ModAsset] Standalone mod plugin shutdown.");
     }

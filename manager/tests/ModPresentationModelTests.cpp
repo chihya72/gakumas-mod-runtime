@@ -3,9 +3,11 @@
 
 #include "ModConfig.hpp"
 #include "ModLog.hpp"
+#include "ReapplyState.hpp"
 
 #include <filesystem>
 #include <fstream>
+#include <cstdint>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -280,6 +282,49 @@ namespace {
 
         std::filesystem::remove_all(dir, ec);
     }
+
+    void TestDeferredReapplyState() {
+        using namespace GakumasMod::Runtime::Detail;
+
+        std::vector<PendingReapplyRequest> requests;
+        CHECK(QueuePendingReapply(requests, "mod-a", "source-a"));
+        CHECK(!QueuePendingReapply(requests, "mod-a", "source-a"));
+        CHECK(QueuePendingReapply(requests, "mod-a", "source-b"));
+        CHECK(QueuePendingReapply(requests, "mod-b", "source-a"));
+        CHECK(ClearPendingReapply(requests, "mod-a", "source-a"));
+        CHECK(!ClearPendingReapply(requests, "mod-a", "source-a"));
+        CHECK(ClearPendingReappliesForMod(requests, "mod-a") == 1);
+        CHECK(requests.size() == 1);
+        CHECK(requests.front().modId == "mod-b");
+    }
+
+    void TestReapplyIdentityRefresh() {
+        using namespace GakumasMod::Runtime::Detail;
+
+        std::vector<ReapplyRendererIdentity> identities;
+        const auto makeIdentity = [](const std::uintptr_t mesh) {
+            return ReapplyRendererIdentity{
+                "source-a",
+                reinterpret_cast<void*>(mesh),
+                2,
+                "Geo_Body",
+            };
+        };
+
+        CHECK(RememberReapplyRendererIdentity(identities, makeIdentity(1)));
+        CHECK(!RememberReapplyRendererIdentity(identities, makeIdentity(1)));
+        CHECK(RememberReapplyRendererIdentity(identities, makeIdentity(2)));
+        CHECK(identities.size() == 2);
+
+        CHECK(RememberReapplyRendererIdentity(identities, makeIdentity(3)));
+        CHECK(RememberReapplyRendererIdentity(identities, makeIdentity(4)));
+        CHECK(RememberReapplyRendererIdentity(identities, makeIdentity(5)));
+        CHECK(identities.size() == MaxRecentIdentitiesPerRenderer);
+        CHECK(std::none_of(identities.begin(), identities.end(), [](const auto& identity) {
+            return identity.originalMesh == reinterpret_cast<void*>(1);
+        }));
+        CHECK(identities.back().originalMesh == reinterpret_cast<void*>(5));
+    }
 }
 
 int main() {
@@ -291,6 +336,8 @@ int main() {
         TestHairAssetKeyNormalization();
         TestManagerUiConfig();
         TestLogLevelConfig();
+        TestDeferredReapplyState();
+        TestReapplyIdentityRefresh();
     }
     catch (const std::exception& failure) {
         std::cout << "ModPresentationModelTests FAILED: " << failure.what() << "\n";

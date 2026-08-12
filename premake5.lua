@@ -121,3 +121,24 @@ workspace "gakumas_mod_runtime"
 			"./src/deps",
 			"./src/runtime",
 		}
+
+	project "mod_runtime_catalog_tests"
+		language "C++"
+		kind "ConsoleApp"
+
+		files {
+			"./tests/ModRuntimeCatalogSmoke.cpp",
+			"./src/runtime/ModRuntimeCatalog.hpp",
+			"./src/runtime/ModRuntimeCatalog.cpp",
+			"./src/runtime/ModRuntimeApi.h",
+			"./src/runtime/ModPaths.hpp",
+		}
+
+		includedirs {
+			"./src/deps",
+			"./src/runtime",
+		}
+
+		-- Release normally defines NDEBUG; this executable deliberately uses
+		-- assert as its fail-fast test primitive, so keep those checks live.
+		undefines { "NDEBUG" }

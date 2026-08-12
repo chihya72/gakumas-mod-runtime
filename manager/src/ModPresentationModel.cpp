@@ -100,6 +100,12 @@ namespace GakumasModManager {
             case RuntimeTargetKind::Unknown:
                 ++model.invalidModCount;
                 continue;
+            default:
+                // Defensive boundary for corrupted or future enum values. Do
+                // not let an unrecognized target consume an uninitialized
+                // category or silently appear under the wrong tab.
+                ++model.invalidModCount;
+                continue;
             }
 
             ModPresentationItem item;

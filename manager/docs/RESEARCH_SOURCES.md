@@ -1,6 +1,6 @@
 # 调查数据源与证据等级
 
-> 最后更新：2026-08-09
+> 最后更新：2026-08-12
 
 本文说明当前 Mod 管理器的签名从哪里来、哪些结论可以作为实现依据，以及接手者如何在
 游戏更新后重新验证。外部绝对路径是当前调查机输入，不是仓库运行依赖。
@@ -84,10 +84,11 @@ UnityEngine.UI.ScrollRect.get_content         设置页滚动内容
 
 ## 4. 实机日志与截图
 
-日志：
+UI 日志与 Runtime 替换日志：
 
 ```text
 <游戏目录>\gakumas-mod\mod-manager.log
+<游戏目录>\gakumas-mod\mod-plugin.log
 ```
 
 当前 A 级 UI 证据：
@@ -106,9 +107,10 @@ UnityEngine.UI.ScrollRect.get_content         设置页滚动内容
   后也显示“月村手毬 · 公主皇冠”；
 - 同轮 Manifest 与日志确认开关写回成功；输入回调后原生组件二次反转滑块的问题已通过
   `EventSystem.Update()` 原始处理后的连续校正确认修复；
-- 发型日志确认 `CostumeHead.GetThumbAssetName()` 返回
-  `img_cos_costume_head_ttmr-hair-0002_head`，并交给官方 `ThumbnailViewBase.Set`；当前页面最终
-  图像是否可见仍需截图，所以只把“资源提交”标 A，不把“最终预览”标 A；
+- 旧发型日志曾确认 `CostumeHead.GetThumbAssetName()` 返回
+  `img_cos_costume_head_ttmr-hair-0002_head`，但只调用基类 `ThumbnailViewBase.Set(assetName)` 会
+  留下未初始化空态并丢失长按详情，已删除；当前源码把 master `CostumeHead` 作为 `ICostume`
+  交给 `CostumeThumbnailView.Set(ICostume)`，最终图像是否可见仍需截图；
 - 21:13–21:14 日志确认三种导航：Mod→Mod 消费重复点击并 `menuClosed=1`、系统设置→Mod
   原位复用并 `menuClosed=1`、Mod→系统设置调用 Reload 并 `menuClosed=1`；
 - 同轮又确认 Reload 后 `MenuView` 地址不变，旧 `g_injectedViews` 记录让 `SetEventHook` 直接
@@ -125,6 +127,15 @@ UnityEngine.UI.ScrollRect.get_content         设置页滚动内容
   只搬顶点，法线和切线留在原地。用索引缓冲算面法线量化：冷路径 `mean(面法线·顶点法线)`
   = +0.967 / 对齐 100%，热路径 = -0.233 / 对齐 73%。修复后热 ON 直接回主页颜色即正确，
   同会话 12 轮 ON/OFF 全部通过。
+- **零活体延迟重应用（2026-08-12，A 级，hmsz 样本）**：管理页 ON 时先记录
+  `Deferred hot reapply queued` 与 `hotInstances=0`；返回主页后出现新一代原 Mesh 身份、正常资源
+  替换和 `Deferred hot reapply satisfied: trigger=Renderer.set_sharedMaterials ... applied=0
+  alreadyPatched=1`。这里 `alreadyPatched=1` 证明资源路径已先完成替换，生命周期重试只负责清
+  队列。该轮 prefab 建链、`RegisterBones` 与 15 根 `hmsz` live bone 正常，无异常、崩溃或重复
+  应用。`registration coverage=15/37` 的 22 个 missing 名字来自已关闭的 `chisaki-swimsuit`
+  全局记录，不是 hmsz 缺骨。启动时 `ResetBounds` / `ResetLocalBounds` 缺失只是可选刷新方法解析
+  失败，Renderer enabled 切换 fallback 仍执行；与本缺陷无关。`atbm-cstm-0140` 最新只执行 OFF，
+  不能把它标为此分支已验证。
 
 橙条方面，`CampusSimpleTabButtonGroup.Initialize()`（`0x02459A7C`）才是把 `GetBarSize()`
 写入 `SelectedBarRect.sizeDelta` 的位置，`SetSelectIndex()` 只改位置。
@@ -145,7 +156,7 @@ UnityEngine.UI.ScrollRect.get_content         设置页滚动内容
 | 幂等导航 | `g_activeModTab` / `PressHook` / `ReloadActiveModScreenAsSettings` | 21:13–21:14 三个分支日志为 A；Reload 后入口缓存失效为 B，待复验 |
 | 稳定排序 | `ModPresentationModel.cpp::SortItems` | 本地测试确认开关状态互换后顺序保持 `名称 + modId` |
 | Master 目标与缩略图 | `ResolveGameTarget` / `AttachOfficialGameThumbnail` | 服装名称与缩略图为 A；发型改走同一条 `CostumeThumbnailView.Set(ICostume)`（master `CostumeHead` 实现 `ICostume`，dump.cs 确认），空态标签与长按详情为 B，待实机复验 |
-| Runtime 热恢复 | `ModRuntime.cpp::SetModEnabled` / 热恢复扫描 | 用户确认 OFF/ON 生效，Runtime 日志记录重应用和 Rig 刷新 |
+| Runtime 热恢复 | `ModRuntime.cpp::SetModEnabled` / 当前 Renderer 快照 / 延迟队列 | 直接 OFF/ON 与 12 轮循环为 A；零活体延迟 ON 的 `hmsz` 样本为 A，`atbm` 同分支待验 |
 | 热 ON 颜色 | `ModRuntime.cpp::TransformModMeshVerticesToOriginalRendererSpace` | **已修复**（2026-08-09，A）。同时搬运法线与切线；抓帧量化与两条已证伪结论见 `../../docs/lessons-learned.md` |
 | 热 OFF 贴图还原 | `ModRuntime.cpp::RestoreModTexturesOnRenderer` | **已修复**（A）。必须先注销 override 再写，否则被 `Material.SetTexture` 的 Hook 换回 Mod 贴图 |
 | 热开关内存 | `ModRuntime.cpp::ReleaseRuntimeMeshClone` | **已修复**（A）。放 gchandle + `Object.Destroy`；日志 30/30 配对，克隆地址复用 |

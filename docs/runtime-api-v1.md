@@ -85,10 +85,16 @@ GmrResult setModEnabled(const char* modIdUtf8, uint8_t enabled);
 
 标准原地 `SkinnedMeshRenderer` 规则：
 
-- OFF 恢复当前场景实例和缓存 Prefab 的原 Mesh、共享材质、骨骼和根骨；
-- ON 只对目标服装/发型资源子树重应用 Mesh、材质、骨骼和贴图；
-- 活动 `CampusActorAnimationRig` 会补齐新动态骨并刷新；
-- Runtime 刷新 Renderer 和目标节点；热 ON 后直接回主页颜色即正确。
+- OFF 恢复当前 Renderer 快照中仍存活且与可逆记录匹配的实例；旧场景对象指针不会跨帧保存
+  或解引用；
+- ON 对当前目标服装/发型资源子树重应用 Mesh、材质、骨骼和贴图；如果当前场景没有目标，
+  Runtime 仍返回成功并按 `modId + source` 排队，在 `RegisterBones` 或 Renderer 材质生命周期
+  回调中重试；
+- `hotInstances=0` 在上述情形表示“当前无目标，已延迟”，不是持久化失败。若资源加载路径已经
+  先完成替换，延迟完成日志会是 `applied=0 alreadyPatched=1`；
+- Runtime 刷新 Renderer 和目标节点；热 ON 后直接回主页颜色即正确；
+- 新增摇物骨/链是在 prefab graft 阶段建立并由游戏初始化收走的，直接热 ON 只刷新已有活体的
+  网格、材质与碰撞体；要让新增链生效仍需重新进入场景。
 
 > 早期文档把热 ON 的颜色错误先后归因于 `MaterialPropertyBlock` 覆盖和
 > `Renderer.set_sharedMaterials` 写回材质数组，两条都已被证伪。真因是换空间时只搬顶点、
@@ -117,10 +123,13 @@ GmrResult setModEnabled(const char* modIdUtf8, uint8_t enabled);
 ## 6. 当前验证状态
 
 - Release x64 已构建并确认导出 `GmrGetRuntimeApiV1`；
-- `tests/ModRuntimeCatalogSmoke.cpp` 写了有效/无效目录、冲突、多目标、缺 Bundle、原子写回和
-  会话回滚语义，**但它还没有被 `premake5.lua` 的任何 project 引用，因此当前不编译也不运行**；
-- 编译并运行的离线测试只有 `mod_presentation_tests`（`package.ps1` 打包前会跑）与
-  Python `unittest discover` 的 4 项；
+- `tests/ModRuntimeCatalogSmoke.cpp` 覆盖有效/无效目录、冲突、多目标、缺 Bundle、原子写回，
+  以及启动冲突写回失败时的会话 fail-closed 语义；它由 `premake5.lua` 编译为
+  `mod_runtime_catalog_tests`，`package.ps1` 打包前强制运行；
+- 另有 `mod_presentation_tests` 与 Python `unittest discover` 的源码契约测试；
 - 目标游戏已确认快照、Manifest 写回和标准服装热 OFF/ON 生效；
 - 标准热 OFF/ON 生效、不崩溃，热 ON 后直接返回主页颜色即正确（2026-08-09，12 轮验证）；
+- 零活体目标时的延迟 ON 已用 `hmsz-fuyuko-icu` 实机确认（2026-08-12）：返回主页后资源路径
+  已完成替换，生命周期 Hook 以 `alreadyPatched=1` 清除队列；`atbm-cstm-0140` 的同分支尚未
+  单独复验；
 - API 头文件 `src/runtime/ModRuntimeApi.h` 现在只有一份，Manager 直接包含它。
