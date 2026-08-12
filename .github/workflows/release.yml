@@ -48,7 +48,7 @@ jobs:
           ZIP_SHA256: ${{ steps.package.outputs.sha256 }}
           DLL_SHA256: ${{ steps.package.outputs.dllsha256 }}
         run: |
-          $notes = @"
+          $notes = @'
           解压到游戏根目录（`gakumas.exe` 所在处）：
 
           ~~~text
@@ -60,9 +60,12 @@ jobs:
 
           | 文件 | SHA-256 |
           |---|---|
-          | `$env:ZIP_NAME` | `$env:ZIP_SHA256` |
-          | `xinput1_3.dll`（包内） | `$env:DLL_SHA256` |
-          "@
+          | `__ZIP_NAME__` | `__ZIP_SHA256__` |
+          | `xinput1_3.dll`（包内） | `__DLL_SHA256__` |
+          '@
+          $notes = $notes.Replace('__ZIP_NAME__', $env:ZIP_NAME).
+            Replace('__ZIP_SHA256__', $env:ZIP_SHA256).
+            Replace('__DLL_SHA256__', $env:DLL_SHA256)
           $notesPath = Join-Path $env:RUNNER_TEMP 'gakumas-mod-runtime-release.md'
           [System.IO.File]::WriteAllText($notesPath, $notes, [System.Text.UTF8Encoding]::new($false))
 
