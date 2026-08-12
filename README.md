@@ -9,6 +9,10 @@
 
 当前发布版本：`1.0.0`。版本变化见 [CHANGELOG.md](CHANGELOG.md)。
 
+> **维护与排障必读**：本仓 Runtime、游戏内管理器和运行时 manifest 契约的审计结论、已知风险
+> 与按现象排查入口见 [docs/known-risks.md](docs/known-risks.md)。遇到游戏崩溃、换模异常、热开关
+> 异常或管理器问题时先查这份台账。
+
 本仓库不保存游戏提取资产、成品 Mod、旧测试 AB 包或生成报告。
 
 ## 当前能力
