@@ -42,7 +42,19 @@ $env:GITEA_TOKEN = "<个人访问令牌，需要 write:repository>"
     -Repository chihya72/gakumas-mod-runtime
 ```
 
-## 自动发布
+## GitHub Actions 自动发布
+
+`.github/workflows/release.yml` 使用 GitHub 托管的 `windows-latest` runner：推送到 `main`
+或手动运行时只构建并上传 artifact；推送 `v*` 标签时构建、上传 artifact 并创建 GitHub Release。
+手动运行用于验证流水线，不创建 Release。
+
+```powershell
+git push github main
+git tag v1.0.0
+git push github v1.0.0
+```
+
+## Gitea 自动发布
 
 `.gitea/workflows/release.yml`：推 `v*` 标签触发，构建 → 打包 → 建 release →
 传 zip。`workflow_dispatch` 手动触发时只构建并上传 artifact，**不**创建 release，

@@ -1,0 +1,76 @@
+name: build-and-release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package
+        id: package
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $version = $env:GITHUB_REF -replace '^refs/tags/', ''
+          } else {
+            $version = "dev-" + $env:GITHUB_SHA.Substring(0, 7)
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          .\tools\package.ps1 -Version $version
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ steps.package.outputs.zip }}
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.package.outputs.version }}
+          ZIP_PATH: ${{ steps.package.outputs.zip }}
+          ZIP_NAME: ${{ steps.package.outputs.name }}
+          ZIP_SHA256: ${{ steps.package.outputs.sha256 }}
+          DLL_SHA256: ${{ steps.package.outputs.dllsha256 }}
+        run: |
+          $notes = @"
+          解压到游戏根目录（`gakumas.exe` 所在处）：
+
+          ~~~text
+          <游戏目录>\xinput1_3.dll
+          <游戏目录>\gakumas-mod\config.json
+          ~~~
+
+          已经装过的直接覆盖 `xinput1_3.dll`。**`gakumas-mod\config.json` 若已存在请勿覆盖**，那是你自己的设置。
+
+          | 文件 | SHA-256 |
+          |---|---|
+          | `$env:ZIP_NAME` | `$env:ZIP_SHA256` |
+          | `xinput1_3.dll`（包内） | `$env:DLL_SHA256` |
+          "@
+          $notesPath = Join-Path $env:RUNNER_TEMP 'gakumas-mod-runtime-release.md'
+          [System.IO.File]::WriteAllText($notesPath, $notes, [System.Text.UTF8Encoding]::new($false))
+
+          $ghArgs = @(
+            'release', 'create', $env:RELEASE_TAG, $env:ZIP_PATH,
+            '--repo', $env:GITHUB_REPOSITORY,
+            '--title', $env:RELEASE_TAG,
+            '--notes-file', $notesPath
+          )
+          & gh @ghArgs
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }
