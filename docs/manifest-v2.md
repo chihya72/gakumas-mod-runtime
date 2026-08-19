@@ -118,6 +118,79 @@ runtime 会要求它是整数 `1`；缺失时兼容旧包。sidecar 中的 `runt
 
 GakumasMI 插件导出时自动生成 sidecar；**手写 manifest 时这三个字段最容易漏**。
 
+## 协议 2：来源代理骨架（实验能力，不是发布功能）
+
+`runtimeProtocol: 2` 走 `BuildSourceProxyBoneArray()`：**每根骨都新建，不复用任何学马
+Transform**，网格继续吃来源权重和来源 bindpose。发布版只接受协议 1，所以协议 2 的包在
+发布 runtime 上是硬失败，不会静默退回混合 graft 产生误导性几何。
+
+协议 1 用**一个 `bones` 数组同时**描述「要建的层级」和「Renderer 权重索引对应的骨数组」。
+这两件事在无权重的根骨、无权重中间父节点和挂点上必然对不上——A-pose 那个包声明
+`rootBone: "Hips"`，而 `Hips` 不带权重、不在 `m_Bones` 里，运行时找不到根骨就整体关闭，
+实机表现是 `meshApplied=0 / materialApplied=1`（只换了材质）。协议 2 把两者拆开：
+
+| 字段 | 要求 |
+|---|---|
+| `transforms` | **必需**。完整来源 Transform 树，含无权重祖先、辅助节点和挂点。每项字段与协议 1 的 `bones` 相同；`parentIndex` 允许**任意顺序**（父可以排在子后面），越界、自指或成环 = 整份作废 |
+| `skinBones` | **必需**。指向 `transforms` 的索引数组，**顺序必须与网格权重索引和 bindpose 一致**。长度必须等于 Renderer 的骨数组长度 |
+| `bindposeCount` | 可选。写了就必须等于 `skinBones` 长度。bindpose 本体在 bundle 的 Mesh 上，**不在 sidecar 里重复一份**（两份真值迟早对不上） |
+| `rootTransform` | 可选。代理层级顶层，**必须是 `parentIndex < 0` 的节点** |
+| `rootBone` | Renderer 的根骨。按名字在 `transforms` 里解析，**可以不是蒙皮骨**。不写且层级有多个根 = 失败 |
+| `semanticMap` | 可选。`{学马人体语义: 来源 transform 名}`。任一取值找不到对应 transform = 整份作废。rest-only 阶段解析并校验但不使用——动画桥是后续阶段，提前要求这个字段等于假装它已经接上了 |
+| `headSocket` | 可选。`{"transform": "<名字>"}`，同样按名字解析校验。保留游戏脸/头发的接合点，当前只校验引用 |
+| `experimentalSourceProxy` | **必需**。`mode` 取 `"rest-only"`（只建骨架、停在 bind 姿势）、`"animation-bridge-minimal"`（驱动 20 根人体骨，无手指）或 `"animation-bridge"`（驱动全部已映射语义）。后两者**必须**带 `semanticMap`。物理三种模式下都关 |
+
+### 动画桥（`animation-bridge*`）
+
+每根被驱动的骨在建桥时算一个常量：
+
+```text
+correction = 游戏骨静止世界旋转⁻¹ · 代理骨静止世界旋转
+每帧：       代理骨世界旋转 = 游戏骨世界旋转 · correction
+```
+
+展开后等于「actor 当前朝向 × 游戏骨相对自身静止的变化 × 来源骨自己的静止」——
+**骨长、关节位置、局部轴向都不进公式**，这正是来源骨架能保住自己比例的原因。
+两个静止姿势在**同一个世界帧**里采样，所以采样瞬间 actor 的朝向会自己抵消掉。
+
+- 游戏骨的静止**从原版 bindpose 反解**（`rendererRot · rot(inv(bindpose))`），不读活体：
+  mod 生效时 actor 可能已经在动，把摆着的姿势当静止会把它烙进之后每一帧。
+  已在原版真值上验过：20 根被驱动骨的 bindpose 静止与节点静止完全一致
+  （不一致的 50 根全是 `_S` 摇物骨，桥不碰）。
+- 代理骨的静止**直接读活体**——它刚建好、还没人驱动，而且语义可能落在无权重的
+  transform 上（这副 rip 的 `Hips` 就是），那种骨压根没有 bindpose。
+- **只写世界旋转，不写位置**，所以来源骨长原样保留。
+- 按 transform 下标升序写（导出器按深度优先写树 ⇒ 父先于子）。先写子会被随后写的父拖走。
+- 挂在 `CampusActorController.LateUpdate`，**先调原函数再写**：游戏的 Animator、IK、
+  关节限位、摇物 job 和这个函数自己的点头/视线修正都跑完了，且还没渲染。
+- **桥按名字存，逐 actor 绑到活体上**。换装发生在 `AssetBundle` 加载钩子里，改的是
+  **prefab 资产**；游戏渲染的是它的 `Instantiate()` 副本。建桥时能摸到的每一个
+  transform（游戏骨和代理骨都是）都属于资产，往它们身上写世界旋转**永远不会有画面**。
+  所以建桥只留 `(游戏骨名, 代理骨名, correction)`，每个 actor 第一次 LateUpdate 时
+  在自己子树里按名字解析一次并缓存（`RegisterBones` 会清缓存，让「绑早了、部件还没挂上」
+  的 actor 有第二次机会）。correction 是两个静止的比值，actor 朝向在它里面已经抵消，
+  所以在资产上算、在实例上用是同一个值。
+- **头靠 `headSocket` 接**：脸和头发是独立部件，骑在**原版 `Head` 骨**上，Animator 照旧
+  把它停在原版头高，而身体自己的头在来源比例决定的位置——差值就是那 13cm。每帧把原版
+  `Head` 的**世界位置**吸到来源头骨上即可闭合。**只写位置不写旋转**：旋转本来就对
+  （`游戏骨世界旋转 = 代理骨世界旋转 · correction⁻¹` 是恒等式），而且留着游戏自己的
+  点头/视线修正继续驱动脸。位置写的是绝对目标不是增量，所以就算 Animator 不重写这根骨
+  的局部位置，重复写也只是幂等，不会累积漂移。
+  `headSocket` 缺省（`-1`）时就用 `semanticMap` 里的 `Head`；声明了就以它为准——
+  头骨位置尴尬的 rip 可以另指一根。
+- 尚未做：Hips 位移（整体仍钉在静止高度）、手指、物理。
+
+**没有向下兼容的单数组写法**：协议 2 缺 `transforms` 直接报错。留一条离线闸门拒绝、
+运行时却照收的路径，等于给自己再造一次「日志全绿而画面不对」。
+
+`transforms` 里的名字**必须唯一**——`rootBone`、`rootTransform`、`semanticMap`、`headSocket`
+全按名字解析，重名会静默指到另一根骨上。运行时按 `__gmi_sp_<index>_<name>` 建 GameObject，
+所以游戏侧任何「按名字找骨」的机制（`AttachQuartzDriver` 的 `resolveBone`、`RegisterBones`）
+都够不到代理骨：**代理路线下的一切驱动必须由动画桥或我们自己的求解器写**。
+
+离线闸门：`mod-workspace/experiments/source-rest-claymore-2026-08-16/check_source_proxy_sidecar.py`
+（`--demo` 自检：1 个正常包不误报、10 个坏包全报）。
+
 ## 部位约定
 
 | part | renderer |

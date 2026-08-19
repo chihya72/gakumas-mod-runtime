@@ -1,5 +1,27 @@
 # Gakumas Mod Runtime 更新日志
 
+## 未发布 — 组件装配收严：预检 fail-closed，不留半初始化组件
+
+- **姿势驱动器改成"先预检、再 AddComponent"**（`AttachQuartzDriver`）：setting 类、四张参数表里
+  每个字段名、每根引用骨，缺任一项就整体拒绝并写明缺什么，**prefab 一点不动**。
+  以前是先挂组件再逐项写引用、缺什么只 warn 后继续 —— prefab 上于是留下一个半初始化的组件，
+  它照样被 Instantiate、照样 OnEnable，然后带着空引用参与解算，日志里只有一行 warn；
+- **预检过了还失败就回滚**：`setting` 建不出来、或写引用时字段/骨又没了，都会
+  `DestroyComponentImmediate` 撤掉刚挂上的组件；
+- **摇物组件初始化失败同样撤掉**：以前失败时组件留在 prefab 上、又没记进
+  `g_createdActorSwingBoneNames`，后续清理找不到它；
+- **驱动器挂不上时不静默替换成摇物**（两者二选一），只把"这根骨在游戏里不会动"写进日志 ——
+  偷偷换一个求解器等于给作者一个"能动但不是他配的"结果；
+- **可选方法找不到时不再记 ERROR。** `SkinnedMeshRenderer.ResetBounds` / `ResetLocalBounds`
+  在这版游戏里被裁掉了（2026-08-18 实机日志坐实），而两处调用本来就判空、拿不到就跳过刷新
+  包围盒 —— 每次启动刷两条 ERROR 会把"日志里有 error 就得看一眼"这条规矩磨钝。
+  `Il2cppUtils::GetMethod` 新增 `optional` 参数，这类查找降为 Info；
+- 纯判定逻辑拆到 `src/runtime/DriverPrecheck.hpp`，`mod_runtime_catalog_tests` 里新增
+  `DriverPrecheckSmoke`：坏 sidecar（骨找不到 / 字段不存在 / 回调为空）必须报且点名，
+  正常包一项都不报。
+- **验证收口（2026-08-18）**：`tools/package.ps1 -Version dev` 构建并通过三个原生检查
+  （`ModPresentationModelTests`、`DriverPrecheckSmoke`、`ModRuntimeCatalogSmoke`）后再打包。
+
 ## 1.0.0 — 独立运行时与游戏内 Mod 管理正式版
 
 - 以 `xinput1_3.dll` 代理提供独立 AssetBundle Mod Runtime，统一扫描

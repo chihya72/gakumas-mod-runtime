@@ -75,6 +75,9 @@ New-Item -ItemType Directory -Force (Join-Path $staging "gakumas-mod") | Out-Nul
 New-Item -ItemType Directory -Force (Join-Path $staging "licenses") | Out-Null
 Copy-Item $dll (Join-Path $staging "xinput1_3.dll")
 Copy-Item (Join-Path $repo "packaging\config.json") (Join-Path $staging "gakumas-mod\config.json")
+# 自建半透明用的 shader 包（Unity 6000.0.77f1 编，与游戏同版本）。缺了它，声明了
+# transparentMaterials 的 mod 会被整体拒绝并在日志里点名，不会静默变回不透明。
+Copy-Item (Join-Path $repo "packaging\gmi_shaders.bundle") (Join-Path $staging "gakumas-mod\gmi_shaders.bundle")
 Copy-Item (Join-Path $repo "packaging\README.txt") (Join-Path $staging "README.txt")
 Copy-Item (Join-Path $repo "LICENSE") (Join-Path $staging "LICENSE")
 Copy-Item (Join-Path $repo "third-party-notices.md") (Join-Path $staging "third-party-notices.md")

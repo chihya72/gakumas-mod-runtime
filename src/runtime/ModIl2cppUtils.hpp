@@ -82,20 +82,30 @@ namespace GakumasMod::Il2cppUtils {
         return klass;
     }
 
+    // `optional=true` 用于**找不到也照常工作**的方法（调用处 null 判过、有降级路径）。
+    // 那种情况按 Error 记是假警报：发行版被裁掉的 API 每次启动都刷一条 ERROR，
+    // 而"日志里有 error 就得看一眼"这条规矩会被这几行磨钝 —— 本项目吃过
+    // 「在原版上也报的闸门比没有闸门更坏」的亏，日志同理。
     inline UnityResolve::Method* GetMethod(const std::string& assemblyName,
         const std::string& nameSpaceName,
         const std::string& className,
         const std::string& methodName,
-        const std::vector<std::string>& args = {}) {
+        const std::vector<std::string>& args = {},
+        const bool optional = false) {
         const auto klass = GetClass(assemblyName, nameSpaceName, className);
         if (!klass) return nullptr;
 
         const auto method = klass->Get<UnityResolve::Method>(methodName, args);
         if (!method) {
-            Log::ErrorFmt("[ModAsset] Method not found: %s::%s.%s",
-                nameSpaceName.c_str(),
-                className.c_str(),
-                methodName.c_str());
+            const char* format = "[ModAsset] Method not found: %s::%s.%s";
+            if (optional) {
+                Log::InfoFmt("[ModAsset] Optional method absent (有降级路径): %s::%s.%s",
+                    nameSpaceName.c_str(), className.c_str(), methodName.c_str());
+            }
+            else {
+                Log::ErrorFmt(format, nameSpaceName.c_str(), className.c_str(),
+                    methodName.c_str());
+            }
             return nullptr;
         }
         return method;

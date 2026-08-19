@@ -1,5 +1,6 @@
 #include "ModRuntimeApi.h"
 #include "ModRuntimeCatalog.hpp"
+#include "DriverPrecheck.hpp"
 #include "ModPaths.hpp"
 
 #include "nlohmann/json.hpp"
@@ -59,6 +60,49 @@ namespace {
         return snapshot.at("mods").front();
     }
 }
+
+// 批次 5：驱动器的必需引用预检必须**两个方向**都对 —— 缺引用的坏 sidecar 整体拒绝并写明缺什么，
+// 正常包一个字都不许报（在原版上也报的闸门比没有闸门更坏）。
+// 这段逻辑在 DriverPrecheck.hpp 里是纯的，所以能在这儿离线验，不用进游戏。
+static void DriverPrecheckSmoke() {
+    using GakumasMod::Runtime::LocalQuartzDriver;
+    using GakumasMod::Runtime::MissingDriverReferences;
+
+    LocalQuartzDriver driver;
+    driver.type = "Skirt";
+    driver.floats = { {"radius", 0.1f} };
+    driver.ints = { {"layer", 2} };
+    driver.vectors = { {"offset", {0.0f, 1.0f, 0.0f}} };
+    driver.bones = { {"referenceBone", "LeftUpLeg"} };
+
+    const auto everyFieldExists = [](const std::string&) { return true; };
+    const auto everyBoneExists = [](const std::string&) { return true; };
+    const auto noBone = [](const std::string&) { return false; };
+    const auto onlyFloats = [&](const std::string& name) { return name == "radius"; };
+
+    // 正常包：一项都不该报
+    assert(MissingDriverReferences("S", driver, everyFieldExists, everyBoneExists).empty());
+
+    // 骨找不到：报，且文案点名是哪根骨
+    const auto missingBone = MissingDriverReferences("S", driver, everyFieldExists, noBone);
+    assert(missingBone.size() == 1);
+    assert(missingBone.front().find("LeftUpLeg") != std::string::npos);
+
+    // 字段不存在：四张表逐张都要查到（int / vector / 骨引用的字段名都缺）
+    const auto missingFields = MissingDriverReferences("S", driver, onlyFloats, everyBoneExists);
+    assert(missingFields.size() == 3);
+    assert(GakumasMod::Runtime::JoinMissingReferences(missingFields).find("layer")
+           != std::string::npos);
+
+    // 回调没给（resolveBone 为空那种）也算缺，不许当通过
+    assert(!MissingDriverReferences("S", driver, everyFieldExists, nullptr).empty());
+    assert(!MissingDriverReferences("S", driver, nullptr, everyBoneExists).empty());
+
+    // 什么都没声明的驱动器没有必需引用 —— 不该被拦
+    assert(MissingDriverReferences("S", LocalQuartzDriver{}, nullptr, nullptr).empty());
+    std::cout << "DriverPrecheckSmoke passed\n";
+}
+
 
 int main() {
     wchar_t tempBuffer[MAX_PATH]{};
@@ -232,6 +276,7 @@ int main() {
     std::filesystem::current_path(previous);
     std::filesystem::remove_all(root, ec);
     assert(!ec);
+    DriverPrecheckSmoke();
     std::cout << "ModRuntimeCatalogSmoke passed\n";
     return 0;
 }
