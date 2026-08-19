@@ -7692,15 +7692,39 @@ namespace GakumasMod::Runtime {
                 if (!boneClass || !root) return;
                 const auto bones = root->GetComponentsInChildren<void*>(boneClass, true);
                 if (bones.empty()) return;
-                const auto stride = bones.size() / 24 + 1;
-                for (size_t index = 0; index < bones.size(); index += stride) {
-                    if (const auto bone = GetComponentTransform(bones[index])) {
-                        watched.emplace_back(bone, bone->GetLocalRotation());
+                // **优先盯我们自己建的那些骨**。按 stride 抽 24 根是给"有没有骨在动"这个
+                // 问题设计的，而现在的问题变成了"我那根飘带到底转了多少度" —— 抽样抽不到它，
+                // 三次实机都只能靠肉眼猜。自建骨的名字运行时手里就有（g_createdActorSwingBoneNames）。
+                //
+                // 这里的 latch 时机是有讲究的：探针是一次性的 static，而第一个 actor 的
+                // LateUpdate **早于**我们的骨被 graft 出来（实测日志里探针那行就排在 sidecar
+                // 之前），latch 早了就整轮退回抽样、白跑一次实机。所以骨还没出现时先等，
+                // 等够了再认这个包没有自建骨、退回抽样。
+                {
+                    std::lock_guard swingStateLock(g_swingStateMutex);
+                    for (const auto& bone : bones) {
+                        const auto transformOfBone = GetComponentTransform(bone);
+                        if (!transformOfBone) continue;
+                        if (g_createdActorSwingBoneNames.contains(
+                                GetUnityObjectNameString(transformOfBone))) {
+                            watched.emplace_back(transformOfBone, transformOfBone->GetLocalRotation());
+                        }
+                    }
+                }
+                const bool ownBones = !watched.empty();
+                if (!ownBones) {
+                    static int waited = 0;
+                    if (++waited < 900) return;  // ~15 秒，等 graft 把骨建出来
+                    const auto stride = bones.size() / 24 + 1;
+                    for (size_t index = 0; index < bones.size(); index += stride) {
+                        if (const auto bone = GetComponentTransform(bones[index])) {
+                            watched.emplace_back(bone, bone->GetLocalRotation());
+                        }
                     }
                 }
                 peak.assign(watched.size(), 0.0f);
-                Log::WarnFmt("[ModAsset][EXPERIMENT] Swing motion probe watching %zu of %zu swing bones on this actor",
-                    watched.size(), bones.size());
+                Log::WarnFmt("[ModAsset][EXPERIMENT] Swing motion probe watching %zu of %zu swing bones on this actor (%s)",
+                    watched.size(), bones.size(), ownBones ? "mod bones by name" : "sampled");
                 return;
             }
 
@@ -7726,6 +7750,16 @@ namespace GakumasMod::Runtime {
                 GetUnityObjectNameString(watched[best].first).c_str(), peak[best],
                 movers == 0 ? "NOT SIMULATED (parameters are irrelevant until this moves)"
                             : "simulated (look at the cage/limits, not the springs)");
+            // 逐骨打出来：只报 best 的话，"这根到底转了 3° 还是 90°"永远读不到，
+            // 而那正是区分"没在动 / 正常摆 / 甩飞"的唯一数字。
+            std::vector<size_t> order(peak.size());
+            for (size_t index = 0; index < order.size(); ++index) order[index] = index;
+            std::sort(order.begin(), order.end(),
+                [&](size_t left, size_t right) { return peak[left] > peak[right]; });
+            for (const auto index : order) {
+                Log::WarnFmt("[ModAsset][EXPERIMENT] Swing peak: %-28s %7.2f deg",
+                    GetUnityObjectNameString(watched[index].first).c_str(), peak[index]);
+            }
         }
 
         // The actor's own LateUpdate: the game's Animator, its animation jobs (IK, joint
