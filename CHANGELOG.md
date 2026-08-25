@@ -1,6 +1,11 @@
 # Gakumas Mod Runtime 更新日志
 
-## 未发布 — 组件装配收严：预检 fail-closed，不留半初始化组件
+## 1.1.0 — 组件装配收严：预检 fail-closed，不留半初始化组件
+
+- **删掉 300 帧摇物探针**（`SampleSwingMotion`，2026-08-22）：它是"先证明骨在动、再谈参数"那一轮
+  的测试仪器，结论已经拿到（自建骨确实在被解算），留着只是每个 actor 多一次每帧原子读 +
+  一堆 `[EXPERIMENT]` 日志。配套下线 `tools/read_runtime_log.py` 的 `swingMoved` /
+  `swingProbeWatching` / `swingProbeLegacySingle` 三个键。
 
 - **姿势驱动器改成"先预检、再 AddComponent"**（`AttachQuartzDriver`）：setting 类、四张参数表里
   每个字段名、每根引用骨，缺任一项就整体拒绝并写明缺什么，**prefab 一点不动**。
@@ -19,6 +24,13 @@
 - 纯判定逻辑拆到 `src/runtime/DriverPrecheck.hpp`，`mod_runtime_catalog_tests` 里新增
   `DriverPrecheckSmoke`：坏 sidecar（骨找不到 / 字段不存在 / 回调为空）必须报且点名，
   正常包一项都不报。
+- **动画桥的每帧 tick 加无锁快路**：`CampusActorController.LateUpdate` 的 hook 是无条件装的，
+  但桥本身是 `runtimeProtocol=2` 的逐包 opt-in —— 普通包一条桥都没有，却每帧、每个 actor 都要
+  去抢 `g_swingStateMutex`，而那把锁在后台线程做 graft 时会被占很久，换装那一瞬间主线程
+  就被挡在这里。改成只在装过桥时才进临界区，其余时间一次 relaxed 原子读就返回；
+- **构建产物移出仓库**：`tools/gameassembly-capture/` 的 `bin/`、`obj/` 和四个
+  `GameAssemblySelfCapture.*` 是 1.0.0 之后误提交的，已取消跟踪并补进 `.gitignore`
+  （不写 `*.obj`，这个项目里 `.obj` 更可能是模型文件）；
 - **验证收口（2026-08-18）**：`tools/package.ps1 -Version dev` 构建并通过三个原生检查
   （`ModPresentationModelTests`、`DriverPrecheckSmoke`、`ModRuntimeCatalogSmoke`）后再打包。
 

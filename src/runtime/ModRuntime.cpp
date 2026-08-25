@@ -387,6 +387,11 @@ namespace GakumasMod::Runtime {
         };
 
         std::vector<SourceProxyBridge> g_sourceProxyBridges;
+        // 无锁快路。桥是 protocol=2 的逐包 opt-in，普通包一条都不会有，但
+        // `LateUpdate` 的 hook 是无条件装的 —— 没有这个标志，每帧、每个 actor 都要去抢
+        // `g_swingStateMutex`，而那把锁在后台线程做 graft 时会被占很久，换装那一瞬间
+        // 主线程就被挡在这里。只在装桥处置位，其余时间一次 relaxed 读就返回。
+        std::atomic_bool g_sourceProxyBridgesArmed{};
 
         // The same link resolved against one live actor's own copies of those transforms.
         struct SourceProxyLiveLink {
@@ -3669,6 +3674,7 @@ namespace GakumasMod::Runtime {
                 std::erase_if(g_sourceProxyBridges,
                     [&](const SourceProxyBridge& item) { return item.renderer == originalRenderer; });
                 g_sourceProxyBridges.emplace_back(std::move(bridge));
+                g_sourceProxyBridgesArmed.store(true, std::memory_order_relaxed);
                 // Actors that already decided they had no bridge get to look again.
                 g_sourceProxyLiveBridges.clear();
             }
@@ -3773,12 +3779,15 @@ namespace GakumasMod::Runtime {
         // Runs from the actor's LateUpdate, after the game's own animation, IK and
         // corrections have written the human bones for this frame.
         void DriveSourceProxyBridges(void* actor) {
+            if (!g_sourceProxyBridgesArmed.load(std::memory_order_relaxed)) return;
             std::lock_guard swingStateLock(g_swingStateMutex);
             // An unloaded bundle leaves its template behind; the prefab renderer it was
             // keyed by is gone and a new asset can land on that address.
             std::erase_if(g_sourceProxyBridges, [](const SourceProxyBridge& bridge) {
                 return !IsNativeObjectAlive(bridge.renderer);
             });
+            g_sourceProxyBridgesArmed.store(!g_sourceProxyBridges.empty(),
+                std::memory_order_relaxed);
             if (!actor || g_sourceProxyBridges.empty()) return;
 
             auto found = g_sourceProxyLiveBridges.find(actor);
@@ -5872,6 +5881,7 @@ namespace GakumasMod::Runtime {
                 // a bridge is cheap to re-arm on the next ON, and the template carries no modId.
                 g_sourceProxyBridges.clear();
                 g_sourceProxyLiveBridges.clear();
+                g_sourceProxyBridgesArmed.store(false, std::memory_order_relaxed);
             }
             std::vector<ReversibleRendererPatch> patches;
             {
@@ -7664,103 +7674,6 @@ namespace GakumasMod::Runtime {
 
         std::atomic_bool g_bridgeTickObserved{};
 
-        // Is the swing solver actually moving these bones, or are they only being carried by their
-        // parents?
-        //
-        // Three rounds of substantially different swing parameters — medians, then the replaced
-        // costume's own values, then correct collision masks — produced pixel-identical results.
-        // A system that ignores its inputs that completely is usually not running, and every one of
-        // those rounds tuned HOW it runs without ever measuring WHETHER it runs. A swing bone that
-        // is simulated has a local rotation that drifts from its rest; one that is merely skinned
-        // does not move locally at all, no matter how much the body moves.
-        void SampleSwingMotion(void* actor) {
-            static std::atomic_bool done{};
-            // Many bones, not one: the first sample happened to be a sleeve, and by this costume's
-            // own data sleeves carry no chain — so "it did not move" was not evidence about the
-            // solver.  Watch a spread and report the best mover, which is what says whether ANY of
-            // them is being simulated.
-            static std::vector<std::pair<UnityResolve::UnityType::Transform*,
-                UnityResolve::UnityType::Quaternion>> watched;
-            static std::vector<float> peak;
-            static int frames = 0;
-            if (done.load()) return;
-
-            if (watched.empty()) {
-                const auto boneClass = FindClassByName("ActorSwingDynamicBone");
-                const auto transform = GetComponentTransform(actor);
-                const auto root = transform ? transform->GetGameObject() : nullptr;
-                if (!boneClass || !root) return;
-                const auto bones = root->GetComponentsInChildren<void*>(boneClass, true);
-                if (bones.empty()) return;
-                // **优先盯我们自己建的那些骨**。按 stride 抽 24 根是给"有没有骨在动"这个
-                // 问题设计的，而现在的问题变成了"我那根飘带到底转了多少度" —— 抽样抽不到它，
-                // 三次实机都只能靠肉眼猜。自建骨的名字运行时手里就有（g_createdActorSwingBoneNames）。
-                //
-                // 这里的 latch 时机是有讲究的：探针是一次性的 static，而第一个 actor 的
-                // LateUpdate **早于**我们的骨被 graft 出来（实测日志里探针那行就排在 sidecar
-                // 之前），latch 早了就整轮退回抽样、白跑一次实机。所以骨还没出现时先等，
-                // 等够了再认这个包没有自建骨、退回抽样。
-                {
-                    std::lock_guard swingStateLock(g_swingStateMutex);
-                    for (const auto& bone : bones) {
-                        const auto transformOfBone = GetComponentTransform(bone);
-                        if (!transformOfBone) continue;
-                        if (g_createdActorSwingBoneNames.contains(
-                                GetUnityObjectNameString(transformOfBone))) {
-                            watched.emplace_back(transformOfBone, transformOfBone->GetLocalRotation());
-                        }
-                    }
-                }
-                const bool ownBones = !watched.empty();
-                if (!ownBones) {
-                    static int waited = 0;
-                    if (++waited < 900) return;  // ~15 秒，等 graft 把骨建出来
-                    const auto stride = bones.size() / 24 + 1;
-                    for (size_t index = 0; index < bones.size(); index += stride) {
-                        if (const auto bone = GetComponentTransform(bones[index])) {
-                            watched.emplace_back(bone, bone->GetLocalRotation());
-                        }
-                    }
-                }
-                peak.assign(watched.size(), 0.0f);
-                Log::WarnFmt("[ModAsset][EXPERIMENT] Swing motion probe watching %zu of %zu swing bones on this actor (%s)",
-                    watched.size(), bones.size(), ownBones ? "mod bones by name" : "sampled");
-                return;
-            }
-
-            for (size_t index = 0; index < watched.size(); ++index) {
-                const auto now = watched[index].first->GetLocalRotation();
-                const auto& rest = watched[index].second;
-                const auto dot = std::fabs(now.x * rest.x + now.y * rest.y + now.z * rest.z
-                    + now.w * rest.w);
-                const auto degrees = 2.0f * std::acos(dot > 1.0f ? 1.0f : dot) * 57.2957795f;
-                if (degrees > peak[index]) peak[index] = degrees;
-            }
-            if (++frames < 300) return;
-
-            done.store(true);
-            size_t movers = 0;
-            size_t best = 0;
-            for (size_t index = 0; index < peak.size(); ++index) {
-                if (peak[index] > 0.5f) ++movers;
-                if (peak[index] > peak[best]) best = index;
-            }
-            Log::WarnFmt("[ModAsset][EXPERIMENT] Swing motion over %d frames: %zu/%zu bones moved, best=%s %.2fdeg — %s",
-                frames, movers, peak.size(),
-                GetUnityObjectNameString(watched[best].first).c_str(), peak[best],
-                movers == 0 ? "NOT SIMULATED (parameters are irrelevant until this moves)"
-                            : "simulated (look at the cage/limits, not the springs)");
-            // 逐骨打出来：只报 best 的话，"这根到底转了 3° 还是 90°"永远读不到，
-            // 而那正是区分"没在动 / 正常摆 / 甩飞"的唯一数字。
-            std::vector<size_t> order(peak.size());
-            for (size_t index = 0; index < order.size(); ++index) order[index] = index;
-            std::sort(order.begin(), order.end(),
-                [&](size_t left, size_t right) { return peak[left] > peak[right]; });
-            for (const auto index : order) {
-                Log::WarnFmt("[ModAsset][EXPERIMENT] Swing peak: %-28s %7.2f deg",
-                    GetUnityObjectNameString(watched[index].first).c_str(), peak[index]);
-            }
-        }
 
         // The actor's own LateUpdate: the game's Animator, its animation jobs (IK, joint
         // limits, swing) and this method's own nod/look-at corrections have all written
@@ -7774,7 +7687,6 @@ namespace GakumasMod::Runtime {
             if (!g_bridgeTickObserved.exchange(true)) {
                 Log::InfoFmt("[ModAsset][EXPERIMENT] Animation bridge tick observed: self=%p", self);
             }
-            SampleSwingMotion(self);
             DriveSourceProxyBridges(self);
         }
 

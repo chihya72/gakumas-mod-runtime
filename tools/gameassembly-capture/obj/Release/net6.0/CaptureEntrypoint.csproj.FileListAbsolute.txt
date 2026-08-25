@@ -1,9 +1,0 @@
-D:\GIT\gakumas-modding\gakumas-mod-runtime\tools\gameassembly-capture\bin\Release\net6.0\GakumasCaptureEntrypoint.deps.json
-D:\GIT\gakumas-modding\gakumas-mod-runtime\tools\gameassembly-capture\bin\Release\net6.0\GakumasCaptureEntrypoint.dll
-D:\GIT\gakumas-modding\gakumas-mod-runtime\tools\gameassembly-capture\obj\Release\net6.0\CaptureEntrypoint.GeneratedMSBuildEditorConfig.editorconfig
-D:\GIT\gakumas-modding\gakumas-mod-runtime\tools\gameassembly-capture\obj\Release\net6.0\CaptureEntrypoint.AssemblyInfoInputs.cache
-D:\GIT\gakumas-modding\gakumas-mod-runtime\tools\gameassembly-capture\obj\Release\net6.0\CaptureEntrypoint.AssemblyInfo.cs
-D:\GIT\gakumas-modding\gakumas-mod-runtime\tools\gameassembly-capture\obj\Release\net6.0\CaptureEntrypoint.csproj.CoreCompileInputs.cache
-D:\GIT\gakumas-modding\gakumas-mod-runtime\tools\gameassembly-capture\obj\Release\net6.0\GakumasCaptureEntrypoint.dll
-D:\GIT\gakumas-modding\gakumas-mod-runtime\tools\gameassembly-capture\obj\Release\net6.0\refint\GakumasCaptureEntrypoint.dll
-D:\GIT\gakumas-modding\gakumas-mod-runtime\tools\gameassembly-capture\obj\Release\net6.0\ref\GakumasCaptureEntrypoint.dll

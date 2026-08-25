@@ -9,3 +9,12 @@ __pycache__/
 *.sln.docstates
 
 /dist/
+
+# MSBuild / dotnet 的中间产物：tools/gameassembly-capture 曾经把整个 bin+obj 提交进来。
+# 不写 *.obj —— 这个项目里 .obj 更可能是模型文件。
+bin/
+obj/
+GameAssemblySelfCapture.dll
+GameAssemblySelfCapture.exp
+GameAssemblySelfCapture.lib
+GameAssemblySelfCapture.obj
