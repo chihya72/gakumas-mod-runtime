@@ -44,11 +44,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.package.outputs.version }}
           ZIP_PATH: ${{ steps.package.outputs.zip }}
-          ZIP_NAME: ${{ steps.package.outputs.name }}
-          ZIP_SHA256: ${{ steps.package.outputs.sha256 }}
-          DLL_SHA256: ${{ steps.package.outputs.dllsha256 }}
         run: |
-          $notes = @'
+          $install = @'
           解压到游戏根目录（`gakumas.exe` 所在处）：
 
           ~~~text
@@ -56,16 +53,14 @@ jobs:
           <游戏目录>\gakumas-mod\config.json
           ~~~
 
-          已经装过的直接覆盖 `xinput1_3.dll`。**`gakumas-mod\config.json` 若已存在请勿覆盖**，那是你自己的设置。
-
-          | 文件 | SHA-256 |
-          |---|---|
-          | `__ZIP_NAME__` | `__ZIP_SHA256__` |
-          | `xinput1_3.dll`（包内） | `__DLL_SHA256__` |
+          已经装过的直接覆盖 `xinput1_3.dll` 即可。
           '@
-          $notes = $notes.Replace('__ZIP_NAME__', $env:ZIP_NAME).
-            Replace('__ZIP_SHA256__', $env:ZIP_SHA256).
-            Replace('__DLL_SHA256__', $env:DLL_SHA256)
+          # 更新说明直接取 CHANGELOG 里本版那一节；取不到就只发安装说明
+          $version = $env:RELEASE_TAG -replace '^v', ''
+          $changelog = Get-Content -Raw -Encoding utf8 'CHANGELOG.md'
+          $pattern = '(?ms)^## ' + [regex]::Escape($version) + '\b.*?(?=^## |\z)'
+          $section = [regex]::Match($changelog, $pattern).Value.Trim()
+          $notes = if ($section) { "$install`n`n$section" } else { $install }
           $notesPath = Join-Path $env:RUNNER_TEMP 'gakumas-mod-runtime-release.md'
           [System.IO.File]::WriteAllText($notesPath, $notes, [System.Text.UTF8Encoding]::new($false))
 
