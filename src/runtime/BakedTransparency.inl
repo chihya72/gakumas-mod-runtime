@@ -1,7 +1,9 @@
 // Included inside ModRuntime.cpp's anonymous namespace. Experimental PC path.
 // All struct-valued managed calls use runtime_invoke, not guessed native ABIs.
 using GmiMatrix = std::array<float, 16>;
-constexpr int GMI_SETTLE_FRAMES = 30;   // 刚出现的渲染器先放这么多帧再烘
+// 刚出现的渲染器：RegisterBones 那一帧 BakeMesh 会原生崩，隔几帧再烘；同时要求蒙皮数据自洽。
+// 发现靠 RegisterBones 事件触发重扫（不再等 20 帧），所以整件衣服基本同时出现。
+constexpr int GMI_SETTLE_FRAMES = 3;
 
 // 没有全局开关：材质自己声明 _GmiBakedAfterDof 就画，没人声明就什么都不做。
 
@@ -174,9 +176,25 @@ bool GmiBindActorRamp(void* renderer, void* block) {
 // Asset replacement patches a prefab. Its scene clones are different renderers;
 // retaining the prefab renderer cannot supply the visible character's current pose.
 std::vector<GmiAfterDofDraw> g_gmiLiveDraws;
+// 蒙皮数据自洽才烘：sharedMesh 在、bones 数 == bindposes 数。角色刚建时游戏还在换 mesh / 装骨，
+// 这两个数会有一瞬不相等，那一瞬 BakeMesh 就是换装页那次原生崩溃最可能的形态。
+bool GmiRendererReady(void* renderer) {
+    static auto getMesh = GmiMethod("SkinnedMeshRenderer", "get_sharedMesh");
+    static auto getBones = GmiMethod("SkinnedMeshRenderer", "get_bones");
+    static auto getBindposes = GmiMethod("Mesh", "get_bindposes");
+    void* mesh = nullptr; void* bones = nullptr; void* bindposes = nullptr;
+    if (!GmiCall(getMesh, renderer, nullptr, &mesh) || !IsNativeObjectAlive(mesh)) return false;
+    if (!GmiCall(getBones, renderer, nullptr, &bones) || !bones) return false;
+    if (!GmiCall(getBindposes, mesh, nullptr, &bindposes) || !bindposes) return false;
+    const auto boneCount = reinterpret_cast<UnityArray<void*>*>(bones)->max_length;
+    const auto poseCount = reinterpret_cast<UnityArray<void*>*>(bindposes)->max_length;
+    return boneCount > 0 && boneCount == poseCount;
+}
+
 void GmiRefreshLiveDraws(int frame) {
     static int lastScan = -60;
-    if (frame >= lastScan && frame - lastScan < 20) return;
+    const bool requested = g_gmiRescanRequested.exchange(false);
+    if (!requested && frame >= lastScan && frame - lastScan < 20) return;
     lastScan = frame;
     // 换装页实机：角色当场新建（RegisterBones 刚打出来、摇物表刚收集），镜面钩子同一帧就找到它并
     // BakeMesh → 原生崩在 UnityEngine 包装层。刚出现的渲染器先放 GMI_SETTLE_FRAMES 帧再烘，
@@ -304,6 +322,7 @@ void DrawGmiBakedTransparency(void* post, void* cmd, void* source) {
         void* material = GmiHandleTarget(item.material);
         if (!IsNativeObjectAlive(renderer) || !IsNativeObjectAlive(material)) { skipped(item, "destroyed"); continue; }
         if (frame - item.firstSeen < GMI_SETTLE_FRAMES) { skipped(item, "settling"); continue; }
+        if (!GmiRendererReady(renderer)) { skipped(item, "skin-not-ready"); continue; }
         int enabledId = GetShaderPropertyId("_GmiBakedAfterDof");
         void* floatArgs[]{ &enabledId };
         float enabled = 0;

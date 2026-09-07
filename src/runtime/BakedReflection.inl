@@ -51,6 +51,7 @@ void GmiDrawIntoReflection(void** contextPtr, int mirror) {
         void* material = GmiHandleTarget(item.material);
         if (!IsNativeObjectAlive(renderer) || !IsNativeObjectAlive(material)) continue;
         if (frame - item.firstSeen < GMI_SETTLE_FRAMES) continue;      // 刚建出来的角色先别烘
+        if (!GmiRendererReady(renderer)) continue;
         bool enabled = false, active = false;
         void* go = nullptr;
         if (!GmiValue(getEnabled, renderer, nullptr, enabled) || !enabled

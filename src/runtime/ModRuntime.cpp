@@ -535,6 +535,7 @@ namespace GakumasMod::Runtime {
         UnityResolve::Method* g_materialSetTextureStringMethod{};
         std::unordered_set<std::string> g_dumpedProfiles{};
         std::atomic_bool g_rigRegisterObserved{};
+        std::atomic_bool g_gmiRescanRequested{};   // 角色 rig 刚注册：烘焙半透明清单立刻重扫
         std::atomic_bool g_nativeChainValidation{};
         std::atomic_bool g_hasPendingReapplies{};
         std::atomic_bool g_pendingReapplyInFlight{};
@@ -1434,6 +1435,7 @@ namespace GakumasMod::Runtime {
                     self, rootTransform, initializeData);
             }
             RememberActiveAnimationRig(self, rootTransform, initializeData);
+            g_gmiRescanRequested = true;   // 新角色到场，别等下一次定时扫描
             const auto nativeChainAttached = AttachNativeChainToLiveRoot(rootTransform);
             // 骨和链都已在 prefab 上就位，游戏自己收走了 —— 这里不再改 initializeData。
             //
