@@ -1,6 +1,6 @@
 # Gakumas Mod Runtime 更新日志
 
-## 未发布 — 烘焙半透明（2026-09-07 实机定案）
+## 1.2.0 — 烘焙半透明（2026-09-07 实机定案）
 
 - **半透明材质段正式走烘焙路线**：`transparentMaterials[].props._GmiBakedAfterDof = 1` 的材质，
   每帧 `BakeMesh` 后在景深之后、bloom 之前显式补画（`src/runtime/BakedTransparency.inl`），
