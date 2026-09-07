@@ -33,6 +33,17 @@ public static class GmiBuild
             return;
         }
         var bundle = Path.Combine(outDir, "gmi_shaders");
+        // Building can report success even when the AssetBundle module is disabled.
+        // In that case the file contains a Shader but no AssetBundle/container.
+        var loaded = AssetBundle.LoadFromFile(bundle);
+        if (loaded == null || loaded.LoadAsset<Shader>(shaderPath) == null)
+        {
+            Debug.LogError("GMI_BUILD_FAIL bundle cannot load its shader; ensure com.unity.modules.assetbundle is enabled");
+            if (loaded != null) loaded.Unload(true);
+            EditorApplication.Exit(4);
+            return;
+        }
+        loaded.Unload(true);
         Debug.Log("GMI_BUILD_OK " + bundle + " size=" + new FileInfo(bundle).Length);
         EditorApplication.Exit(0);
     }

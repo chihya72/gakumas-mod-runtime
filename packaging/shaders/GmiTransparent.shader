@@ -24,6 +24,7 @@ Shader "Gmi/Transparent"
         _ShadeMap ("Shade Color (t4)", 2D) = "black" {}
         _BaseColor ("Tint", Color) = (1,1,1,1)
         _Alpha ("Alpha", Range(0,1)) = 0.5
+        _GmiBakedAfterDof ("Opt into explicit baked transparency", Float) = 0
         _AlphaFromTexture ("Use t0 alpha", Float) = 1
         _Cutoff ("Discard below", Range(0,1)) = 0.004
         _DepthCutoff ("ZPrePass writes above", Range(0,1)) = 0.1
@@ -46,6 +47,11 @@ Shader "Gmi/Transparent"
         // 写上和原版角色一样的 stencil 64，这趟就会绕开我们。
         _StencilRef ("Actor stencil ref", Float) = 64
         _StencilWriteMask ("Actor stencil write mask", Float) = 64
+        // 场景染色（只作用于两条 baked 通路）。默认全开，作者可在 mod JSON 里关掉或调曝光。
+        _GmiSceneTint ("Scene light tint", Range(0,1)) = 1
+        _GmiExposure ("Baked exposure", Range(0,2)) = 1
+        _GmiToonThreshold ("Vanilla toon threshold", Range(0,1)) = 0.3
+        _GmiToonFloor ("Vanilla toon floor", Range(0,1)) = 0.745
     }
 
     SubShader
@@ -86,7 +92,8 @@ Shader "Gmi/Transparent"
         half4 _MainLightColor;
 
         struct appdata { float4 vertex : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; };
-        struct v2f { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; float3 worldNormal : TEXCOORD1; };
+        struct v2f { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; float3 worldNormal : TEXCOORD1;
+                     float3 worldPos : TEXCOORD2; };
 
         v2f vertCommon(appdata v)
         {
@@ -94,12 +101,89 @@ Shader "Gmi/Transparent"
             o.pos = UnityObjectToClipPos(v.vertex);
             o.uv = TRANSFORM_TEX(v.uv, _BaseMap);
             o.worldNormal = UnityObjectToWorldNormal(v.normal);
+            o.worldPos = mul(unity_ObjectToWorld, v.vertex).xyz;
             return o;
         }
 
         float SampleAlpha(float2 uv)
         {
             return lerp(1.0, tex2D(_BaseMap, uv).a, _AlphaFromTexture) * _Alpha;
+        }
+
+        // Actor cloth lighting prototype, based on body PS f872756c910a6eb7.
+        // The previous luminance-normalized light tint missed scene shadow color.
+        // Global names are present in PC metadata; their register mapping still
+        // needs a live capture comparison. No SH, shadow-map or specular parity yet.
+        // Campus.Rendering.Shaders.ShaderVariablesActorLighting, exact 528-byte
+        // layout from ActorCBuffer.cs metadata, confirmed against native PS cb2.
+        // URP _AdditionalLights* is a DIFFERENT light list (185607 capture).
+        CBUFFER_START(ShaderVariablesActorLighting)
+            uint4 _LightData;
+            float4 _LightPositions[8];
+            float4 _LightColors[8];
+            float4 _LightAttenuations[8];
+            float4 _LightDirections[8];
+        CBUFFER_END
+        float _GmiActorIndex;
+        float _GmiSceneTint, _GmiExposure, _GmiToonThreshold, _GmiToonFloor;
+
+        // Names exist in the PC metadata and CampusActorParameterPass. These are
+        // scene globals, deliberately not material Properties (which would shadow them).
+        float4 _MatCapMainLight, _MatCapParam, _ShadeMultiplyColor, _GlobalLightParameter;
+        float4 _MatCapLightColor, _ShadeAdditiveColor;
+        sampler2D _GmiActorRamp;
+        float _GmiActorRampReady;
+        float4x4 _GmiLightingView;
+
+        float3 GmiActorAdditionalLight(float3 worldPos, float3 n)
+        {
+            float3 sum = 0;
+            uint actor = (uint)clamp(_GmiActorIndex, 0, 15);
+            uint mask = (_LightData[actor >> 2] >> ((actor & 3) * 8)) & 255;
+            [loop] for (int i = 0; i < 8; ++i)
+            {
+                if ((mask & (1u << i)) == 0) continue;
+                float3 toLight = _LightPositions[i].xyz - worldPos * _LightPositions[i].w;
+                float distSqr = max(dot(toLight, toLight), 6.103515625e-05);
+                float3 dir = toLight * rsqrt(distSqr);
+                float spot = saturate(dot(_LightDirections[i].xyz, dir)
+                    * _LightAttenuations[i].z + _LightAttenuations[i].w);
+                float atten = spot * spot;
+                if (_LightDirections[i].w != 1)      // 平行光那支不吃距离衰减
+                {
+                    float f = _LightAttenuations[i].x * distSqr;
+                    f = max(0, 1 - f * f); f *= f;
+                    atten *= f / distSqr;
+                    float h = saturate(dot(n, dir)) * 0.5 + 0.5; h *= h;
+                    float t = saturate(1024.17041 * (h * 2.3561945 - (_MatCapParam.x - 0.0004883)));
+                    atten *= saturate((3 - 2 * t) * t * t + _MatCapParam.z);
+                }
+                sum += _LightColors[i].rgb * atten;
+            }
+            return sum * _GlobalLightParameter.y;
+        }
+
+        // Shared by main and mirror. Preserve actual HDR intensity and alpha;
+        // do not normalize the stage light into an arbitrary tint.
+        float3 GmiActorCloth(float2 uv, float3 worldPos, float3 normal, float3 viewNormal)
+        {
+            float3 base = tex2D(_BaseMap, uv).rgb * _BaseColor.rgb;
+            float4 def = tex2D(_DefMap, uv);
+            float4 shade = tex2D(_ShadeMap, uv);
+            float3 lightNormal = _MatCapMainLight.w > 0.5 ? normal : viewNormal;
+            float rampU = saturate(dot(lightNormal, _MatCapMainLight.xyz) * 0.5 + 0.5
+                - 0.5 * (_MatCapParam.x - (def.r * 2 - 1)));
+            float4 ramp = tex2D(_GmiActorRamp, float2(rampU, 0));
+            if (_GmiActorRampReady < 0.5) ramp = float4(1,1,1,1-rampU);
+            // Body PS: lerp(base, shade * sceneShadow, sceneWeight * ramp.a),
+            // followed by its shade-alpha branch for the multiplicative ramp.
+            float weight = saturate(_MatCapParam.z);
+            float3 shaded = lerp(base, shade.rgb * _ShadeMultiplyColor.rgb, weight * ramp.a);
+            float3 rampTint = lerp(ramp.rgb, ramp.rgb * _ShadeMultiplyColor.rgb, ramp.a);
+            float3 color = lerp(shaded, base * lerp(1.0, rampTint, weight), shade.a);
+            color = color * (_MatCapLightColor.rgb + GmiActorAdditionalLight(worldPos, normal))
+                + _ShadeAdditiveColor.rgb * ramp.a;
+            return lerp(base, color, _GmiSceneTint) * _GmiExposure;
         }
 
         // 顶点色故意不采样：mod 网格的 COLOR 是描边参数（布料预设 (0,0,255,0)），
@@ -286,6 +370,94 @@ Shader "Gmi/Transparent"
                 o.rt0 = float4(0.0, 0.0, 16376.0 * sqrt(saturate(i.pos.z)), 0.0);
                 o.rt1 = 0;                                 // 被 ColorMask 屏蔽，写什么都不进去
                 return o;
+            }
+            ENDCG
+        }
+        // Selected explicitly by Material.FindPass, never by the game's renderer lists.
+        // CPU-baked vertices and private matrices avoid stale SRP object/skinning state.
+        Pass
+        {
+            Name "GmiBakedAfterDof"
+            Tags { "LightMode" = "GmiBakedAfterDof" }
+            Blend One OneMinusSrcAlpha
+            ZWrite Off
+            ZTest Always
+            Cull [_Cull]
+            CGPROGRAM
+            #pragma target 3.5
+            #pragma vertex vertBaked
+            #pragma fragment fragBaked
+            float4x4 _GmiMVP, _GmiMV, _GmiModel;
+            float4 _GmiViewport, _GmiDepthProjection, _GmiDepthSettings;
+            sampler2D _GmiSceneDepth;
+            struct bakedVaryings {
+                float4 position : SV_POSITION;
+                float2 uv : TEXCOORD0;
+                float eyeDepth : TEXCOORD1;
+                float3 normal : TEXCOORD2;
+                float3 worldPos : TEXCOORD3;
+            };
+            bakedVaryings vertBaked(appdata v) {
+                bakedVaryings o;
+                o.position = mul(_GmiMVP, v.vertex);
+                o.eyeDepth = -mul(_GmiMV, v.vertex).z;
+                o.uv = TRANSFORM_TEX(v.uv, _BaseMap);
+                // The hmsz prototype uses uniform object scale.
+                o.normal = normalize(mul((float3x3)_GmiModel, v.normal));
+                o.worldPos = mul(_GmiModel, v.vertex).xyz;
+                return o;
+            }
+            float4 fragBaked(bakedVaryings i, float facing : VFACE) : SV_Target {
+                if (_GmiViewport.w > 0.5) return float4(1,0,1,1);
+                float alpha = SampleAlpha(i.uv);
+                clip(alpha - _Cutoff);
+                float2 uv = i.position.xy / _GmiViewport.xy;
+                if (_GmiViewport.z > 0.5) uv.y = 1 - uv.y;
+                if (_GmiDepthSettings.z > 0.5) {
+                    float4 sampleDepth = tex2Dlod(_GmiSceneDepth, float4(uv,0,0));
+                    float z = sampleDepth.r;
+                    if (_GmiDepthSettings.x > 0.5) {
+                        z = sampleDepth.b / 16376.0;
+                        z *= z;
+                    }
+                    float denominator = z * _GmiDepthProjection.z - _GmiDepthProjection.x;
+                    float sceneEye = abs((_GmiDepthProjection.y - z * _GmiDepthProjection.w) /
+                        (abs(denominator) > 1e-8 ? denominator : 1e-8));
+                    clip(sceneEye + _GmiDepthSettings.y - i.eyeDepth);
+                }
+                float3 normal = normalize(i.normal) * (facing >= 0 ? 1 : -1);
+                float3 color = GmiActorCloth(i.uv, i.worldPos, normal,
+                    normalize(mul((float3x3)_GmiLightingView, normal)));
+                return float4(color * alpha, alpha);
+            }
+            ENDCG
+        }
+
+        // 镜面补绘。同样由 FindPass 显式选中，不进任何 draw list。
+        // 运行时把这一笔接在 PlanarReflectionUtility.RenderPlanarReflection 返回之后，
+        // 那时 GPU 上还是反射的 VP、反转的剔除、图集那张**带深度附件**的 RT：
+        // 所以顶点走常规变换、遮挡交给 ZTest，不需要后景深那套编码深度采样。
+        // 与 GmiBakedAfterDof 共用 GmiActorCloth，使用当前镜面视图。
+        Pass
+        {
+            Name "GmiBakedReflection"
+            Tags { "LightMode" = "GmiBakedReflection" }
+            Blend One OneMinusSrcAlpha
+            ZWrite Off
+            ZTest LEqual
+            Cull [_Cull]
+            CGPROGRAM
+            #pragma target 3.5
+            #pragma vertex vertReflect
+            #pragma fragment fragReflect
+            v2f vertReflect(appdata v) { return vertCommon(v); }
+            float4 fragReflect(v2f i, float facing : VFACE) : SV_Target {
+                float alpha = SampleAlpha(i.uv);
+                clip(alpha - _Cutoff);
+                float3 normal = normalize(i.worldNormal) * (facing >= 0 ? 1 : -1);
+                float3 color = GmiActorCloth(i.uv, i.worldPos, normal,
+                    normalize(mul((float3x3)UNITY_MATRIX_V, normal)));
+                return float4(color * alpha, alpha);
             }
             ENDCG
         }

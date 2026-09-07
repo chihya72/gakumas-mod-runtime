@@ -68,6 +68,67 @@ gakumas-mod/mods/<mod-id>/mod.json
 | `replaceMaterials` | 是否直接替换材质；通常保持 `false` 并使用贴图规则 |
 | `textures` | renderer、材质槽、shader property 与 Texture2D 资源的映射 |
 | `skeleton` | 可选。bundle 内骨架 sidecar（`TextAsset`）的资源路径；声明后 runtime 按 sidecar 建真实骨链，不再走旧的按名 remap 分支。兼容旧别名 `skeletonAsset` |
+| `transparentMaterials` | 可选。给渲染器追加原版没有的半透明材质段，见下一节 |
+
+## 半透明材质段（`transparentMaterials`）
+
+原版 body 渲染器只有 `m_bdy` / `m_bdyco` 两个材质槽。作者网格多切出来的半透明段（薄纱、罩裙）
+没有原版槽位可对应，这个数组就是告诉 runtime「第 N 段是半透明段，贴图在哪、透明度多少」。
+runtime 读到一条后：从 `gakumas-mod/gmi_shaders.bundle` 取 `Gmi/Transparent` 建一个新材质，
+绑上三张贴图和参数，把 `sharedMaterials` 扩到 `materialSlot + 1` 并填进去。
+
+缺 shader 包、缺 `asset` 贴图、材质建不出来，**整条拒绝并记 ERROR
+（`Transparent materials refused`），不会静默回落成不透明**。`defMap` / `shadeMap` 缺失只 WARN。
+
+```json
+"transparentMaterials": [{
+  "rendererName": "Geo_Body",
+  "materialSlot": 2,
+  "asset": "Assets/Mods/<id>/body_slot0_t0.png",
+  "defMap": "Assets/Mods/<id>/body_slot0_t1.png",
+  "shadeMap": "Assets/Mods/<id>/body_slot0_t4.png",
+  "alpha": 0.5,
+  "toonStrength": 1.0,
+  "cull": 0.0, "zwrite": 0.0, "renderQueue": 3000,
+  "props": { "_GmiBakedAfterDof": 1.0 }
+}]
+```
+
+| 字段 | 说明 | 默认 |
+|---|---|---|
+| `rendererName` | 挂到哪个渲染器；省略时用所属 replacement 的 renderer | — |
+| `materialSlot` | 追加的槽位，等于网格里那个 submesh 的序号（≥ 原版槽数）。必填 | — |
+| `asset` | t0 基础色（bundle 内 Texture2D 路径）。必填；兼容别名 `texture`、`baseMap` | — |
+| `defMap` / `shadeMap` | t1 / t4，卡通明暗用；兼容别名 `packedMask` / `shadeColor` | 空 |
+| `type` | 贴图资源类型 | `Texture2D` |
+| `alpha` | 整体不透明度 | `1.0` |
+| `alphaFromTexture` | 1 = 再乘 t0.a；0 = 只用 `alpha` | `1.0` |
+| `cull` | 0 关 / 1 剔前 / 2 剔后；薄纱是双面片，用 0 | `0.0` |
+| `zwrite` | 颜色 pass 是否写深度 | `0.0` |
+| `cutoff` | 低于此 alpha 的像素丢弃 | `0.004` |
+| `toonStrength` `shadeDarken` `toonSoftness` `aoStrength` | 卡通明暗参数；没有 t1/t4 时 `toonStrength` 被强制为 0 | `1.0` `0.45` `0.08` `0.5` |
+| `renderQueue` | 材质队列；-1 = 用 shader 自带 | `-1` |
+| `props` | 任意 shader 浮点属性，原样 `SetFloat`。当前唯一需要的键见下 | 空 |
+
+### `_GmiBakedAfterDof`（烘焙半透明）
+
+`props` 里声明 `"_GmiBakedAfterDof": 1.0`，这块材质就走 **烘焙半透明** 路线（2026-09-07 实机定案）：
+
+- runtime 自动把 `_ForwardEnable / _ActorTransparentEnable / _ZPrePassEnable / _DepthClaimEnable /
+  _StencilWriteMask` 置 0、队列压到 3000 —— 材质不再进任何 SRP draw list；
+- 每帧对渲染器 `BakeMesh`，在景深之后、bloom 之前用 `GmiBakedAfterDof` pass 显式补画主画面，
+  遮挡用原生的编码深度（`_AdditionalInfoTexture`）；
+- 游戏自己的平面镜（`PlanarReflectionUtility.RenderPlanarReflection`）画完后，用
+  `GmiBakedReflection` pass 在镜面里补画一笔；
+- 光照读角色灯表 `ShaderVariablesActorLighting`（按 `_ActorIndex` 掩码选灯）和场景全局的
+  阴影色 / `_RampMap`，随场景灯光变化；
+- 没有全局开关：有材质声明就画，没有就什么都不做。渲染器出现后最多约 60 帧才被扫到。
+
+不声明这个键就是旧的前向透明路径，已知在景深阶段没有深度附件、会穿透身体，**不要再用**。
+
+已知边界：没有阴影贴图和环境高光；多层纱重叠处 alpha 会累积；镜面补绘不写原版 stencil，
+镜子边缘可能溢出。缺 `defMap` / `shadeMap` 时只有平涂。
+
 
 ## 骨架 sidecar
 

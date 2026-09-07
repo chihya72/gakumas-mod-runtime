@@ -1,5 +1,21 @@
 # Gakumas Mod Runtime 更新日志
 
+## 未发布 — 烘焙半透明（2026-09-07 实机定案）
+
+- **半透明材质段正式走烘焙路线**：`transparentMaterials[].props._GmiBakedAfterDof = 1` 的材质，
+  每帧 `BakeMesh` 后在景深之后、bloom 之前显式补画（`src/runtime/BakedTransparency.inl`），
+  遮挡用原生编码深度；游戏平面镜画完后在镜面里再补一笔（`BakedReflection.inl`，接在
+  `PlanarReflectionUtility.RenderPlanarReflection` 之后，直接继承反射 VP / RT）。
+- **光照跟随场景**：shader 按元数据布局读角色灯表 `ShaderVariablesActorLighting`（`_ActorIndex`
+  掩码选灯）和场景全局阴影色 / `_RampMap`；URP 通用 `_AdditionalLights*` 是另一张表，不再读。
+- **取消测试开关** `gmi-baked-transparency.on` / `gmi-baked-reflection.on`：材质声明即启用，
+  相关钩子无条件安装。删掉「克隆原版材质」对照实验、原版材质属性 dump，以及
+  `transparentMaterials` 里从未发布的 `vanillaMaterial` / `gbufferQueue` 两个字段。
+- `packaging/gmi_shaders.bundle` 更新为含 `GmiBakedAfterDof` / `GmiBakedReflection` pass 的构建
+  （旧包只有 5 趟 pass，装上等于半透明段不显示）。
+- `docs/manifest-v2.md` 补上 `transparentMaterials` 一节；证据链见
+  `docs/transparent-material-success-2026-09-07.md`。
+
 ## 1.1.0 — 组件装配收严：预检 fail-closed，不留半初始化组件
 
 - **删掉 300 帧摇物探针**（`SampleSwingMotion`，2026-08-22）：它是"先证明骨在动、再谈参数"那一轮

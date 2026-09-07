@@ -127,12 +127,6 @@ namespace GakumasMod::Runtime {
             int renderQueue{ -1 };
             // 任意 shader 浮点属性直通（_StencilRef 之类）：调参不用重编 shader
             std::vector<std::pair<std::string, float>> extraFloats{};
-            // 对照实验用：不建自己的材质，改克隆游戏槽 0 的不透明材质来画这一段。
-            // 结果是"游戏眼里的普通衣服"，用来把「糊」归因到管线还是归因到我们的 shader。
-            bool vanillaMaterial{ false };
-            // true = 队列由游戏自己的 VL.VLRenderQueue.GBufferTransparentRange 决定，
-            // 落进原生 G-buffer 阶段那一趟（配合 shader 的 UniversalGBufferActor pass）。
-            bool gbufferQueue{ false };
         };
 
         struct LocalModUnityColor {
@@ -1897,8 +1891,6 @@ namespace GakumasMod::Runtime {
                             GetJsonFloat(transparentItem, "aoStrength", 0.5f),
                             GetJsonInt(transparentItem, "renderQueue", -1),
                             std::move(extraFloats),
-                            transparentItem.value("vanillaMaterial", false),
-                            transparentItem.value("gbufferQueue", false),
                         });
                     }
                 }
@@ -5221,31 +5213,6 @@ namespace GakumasMod::Runtime {
         // 别写死数值：区间是他们定的，版本之间可能变。
         struct LocalRenderQueueRange { int lowerBound; int upperBound; };
 
-        bool GetGBufferTransparentQueue(int& outQueue) {
-            static bool resolved = false;
-            static bool ok = false;
-            static LocalRenderQueueRange range{};
-            if (!resolved) {
-                resolved = true;
-                if (const auto method = Il2cppUtils::GetMethod(
-                        "Unity.RenderPipelines.Universal.Runtime.dll", "VL", "VLRenderQueue",
-                        "get_GBufferTransparentRange", {}, true)) {
-                    range = method->Invoke<LocalRenderQueueRange>();
-                    ok = range.lowerBound > 0 && range.upperBound >= range.lowerBound
-                        && range.upperBound <= 5000;
-                    Log::InfoFmt("[ModAsset] VLRenderQueue.GBufferTransparentRange = [%d, %d] usable=%d",
-                        range.lowerBound, range.upperBound, ok ? 1 : 0);
-                }
-                else {
-                    Log::Error("[ModAsset] VLRenderQueue.GBufferTransparentRange not found; "
-                        "falling back to the queue in mod.json.");
-                }
-            }
-            if (!ok) return false;
-            outQueue = range.lowerBound;
-            return true;
-        }
-
         bool SetMaterialRenderQueue(void* material, const int queue) {
             static auto Material_set_renderQueue = reinterpret_cast<void (*)(void*, int)>(
                 Il2cppUtils::GetMethodPointer("UnityEngine.CoreModule.dll", "UnityEngine", "Material",
@@ -5327,14 +5294,7 @@ namespace GakumasMod::Runtime {
                         replacement.sourceName.c_str(), transparent->materialSlot, transparent->assetName.c_str());
                     return false;
                 }
-                void* material = nullptr;
-                if (transparent->vanillaMaterial) {
-                    // 槽 0 是不透明 body 材质；克隆它（每次重克隆，否则会冻结按场景换的 ramp）
-                    material = CloneUnityObject(current->At(0), replacement.sourceName, rendererIndex);
-                }
-                else {
-                    material = CreateMaterialWithShader(shader);
-                }
+                void* material = CreateMaterialWithShader(shader);
                 if (!material) {
                     Log::ErrorFmt("[ModAsset] Transparent materials refused (Material ctor failed): %s slot=%d",
                         replacement.sourceName.c_str(), transparent->materialSlot);
@@ -5364,11 +5324,6 @@ namespace GakumasMod::Runtime {
                 SetMaterialFloatByName(material, "_ZWriteMode", transparent->zwrite);
                 SetMaterialFloatByName(material, "_Cutoff", transparent->cutoff);
                 SetMaterialFloatByName(material, "_ToonStrength", toonMaps ? transparent->toonStrength : 0.0f);
-                if (transparent->vanillaMaterial) {
-                    Log::InfoFmt("[ModAsset] Transparent slot uses VANILLA material (control run): %s slot=%d material=%s",
-                        replacement.sourceName.c_str(), transparent->materialSlot,
-                        GetUnityObjectNameString(material).c_str());
-                }
                 SetMaterialFloatByName(material, "_ShadeDarken", transparent->shadeDarken);
                 SetMaterialFloatByName(material, "_ToonSoftness", transparent->toonSoftness);
                 SetMaterialFloatByName(material, "_AoStrength", transparent->aoStrength);
@@ -5376,11 +5331,19 @@ namespace GakumasMod::Runtime {
                     SetMaterialFloatByName(material, propertyName, value);
                 }
                 int queue = transparent->renderQueue;
-                if (transparent->gbufferQueue && GetGBufferTransparentQueue(queue)) {
-                    Log::InfoFmt("[ModAsset] Transparent slot uses native GBuffer queue: %s slot=%d queue=%d",
-                        replacement.sourceName.c_str(), transparent->materialSlot, queue);
-                }
                 if (queue >= 0) SetMaterialRenderQueue(material, queue);
+                // The dedicated baked pass is never selected by the normal SRP draw list.
+                // Only opted-in materials switch away from the existing forward route.
+                const bool baked = std::any_of(
+                    transparent->extraFloats.begin(), transparent->extraFloats.end(),
+                    [](const auto& p) { return p.first == "_GmiBakedAfterDof" && p.second > 0.5f; });
+                if (baked) {
+                    for (const char* property : { "_ForwardEnable", "_ActorTransparentEnable",
+                            "_ZPrePassEnable", "_DepthClaimEnable", "_StencilWriteMask" }) {
+                        SetMaterialFloatByName(material, property, 0.0f);
+                    }
+                    SetMaterialRenderQueue(material, 3000);
+                }
                 g_runtimeMaterialHandles.emplace_back(
                     UnityResolve::Invoke<Il2CppGCHandle>("il2cpp_gchandle_new", material, false));
                 expanded->At(static_cast<unsigned int>(transparent->materialSlot)) = material;
@@ -8159,7 +8122,7 @@ namespace GakumasMod::Runtime {
             return pass;
         }
 
-        struct GmiAfterDofDraw { Il2CppGCHandle renderer; Il2CppGCHandle material; int submesh; };
+        struct GmiAfterDofDraw { Il2CppGCHandle renderer; Il2CppGCHandle material; int submesh; int firstSeen{ 0 }; };
         std::vector<GmiAfterDofDraw> g_afterDofDraws;
 
         void RegisterAfterDofDraw(void* renderer, void* material, int submesh) {
@@ -8411,11 +8374,15 @@ namespace GakumasMod::Runtime {
             }
         }
 
+        #include "BakedTransparency.inl"
+        #include "BakedReflection.inl"
+
         void VLPostProcessPass_SetupVLBloom_Hook(void* self, void* cmd, void* source, void* bloom, void* starStreak) {
             if (const auto n = ++g_vlBloomCalls; n == 1 || n == 300) {
                 Log::InfoFmt("[VLDoF] SetupVLBloom FIRED（第 %d 次）self=%p cmd=%p source=%p", n, self, cmd, source);
             }
             DrawAfterDof(cmd, source);          // 先把部件画进 source，再让 bloom 从它取样
+            DrawGmiBakedTransparency(self, cmd, source);
             VLPostProcessPass_SetupVLBloom_Orig(self, cmd, source, bloom, starStreak);
         }
 
@@ -8762,20 +8729,20 @@ namespace GakumasMod::Runtime {
         }
 
         // 半透明路线（research/transparent-material-2026-08-18.md）的只读探针。
-        // 那条路线暂停期间默认**不装**：装了它们就是 target-rig 实机里一个没人声明的变量，
-        // 而"每次进游戏只改一个变量"是这条路线的贯穿规矩。
-        // 该路线自己的任一开关文件在，就照常装；只想要探针就放一个空的 vl-probes.on。
-        bool VLProbesSwitchOn() {
-            static const bool on = VLTransparentPassSwitchOn()
-                || VLGBufferTransparentSwitchOn()
-                || VLAfterDofSwitchOn()
-                || VLDepthPatchSwitchOn()
-                || std::filesystem::exists(Paths::Root() / "vl-probes.on");
-            return on;
-        }
-
+        // 烘焙半透明依赖这里的 SetupVLBloom / VLDeferredPass / RenderPlanarReflection 钩子，
+        // 所以无条件安装；没有材质声明 _GmiBakedAfterDof 时它们只是每 300 帧记一行探针日志。
         void InstallVLProbeHooks() {
-            if (!VLProbesSwitchOn()) return;
+            {
+                // 每面镜子一次。补绘接在它返回之后 —— 那时反射 VP 和图集 RT 还没被恢复。
+                if (const auto m = FindMethodExact("Unity.RenderPipelines.Universal.Runtime.dll",
+                        "VL.Rendering", "PlanarReflectionUtility", "RenderPlanarReflection",
+                        { "CommandBuffer", "ScriptableRenderContext", "RenderingData",
+                          "PlanarReflectionEntityManager", "Int32", "Material",
+                          "Int32", "Int32", "Int32", "RenderStateBlock" })) {
+                    InstallHook("PlanarReflectionUtility.RenderPlanarReflection(baked reflection)", m->function,
+                        reinterpret_cast<void*>(GmiRenderPlanarReflectionHook), &g_gmiRenderPlanarOrig);
+                } else Log::Error("[GmiReflection] PlanarReflectionUtility.RenderPlanarReflection 没找到，镜面补绘不启用");
+            }
             // 只读探针，失败不影响任何既有功能
             if (const auto method = Il2cppUtils::GetMethod(
                     "Unity.RenderPipelines.Universal.Runtime.dll", "VL.Rendering", "VLActorGBuffer",
