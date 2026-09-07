@@ -13,6 +13,8 @@
   `transparentMaterials` 里从未发布的 `vanillaMaterial` / `gbufferQueue` 两个字段。
 - `packaging/gmi_shaders.bundle` 更新为含 `GmiBakedAfterDof` / `GmiBakedReflection` pass 的构建
   （旧包只有 5 趟 pass，装上等于半透明段不显示）。
+- 渲染器发现改为 `CampusActorAnimationRig.RegisterBones` 事件触发，蒙皮自洽后 3 帧即烘，
+  半透明段与衣服其余部分基本同时出现（原为 60 帧定时扫描）。
 - `docs/manifest-v2.md` 补上 `transparentMaterials` 一节；证据链见
   `docs/transparent-material-success-2026-09-07.md`。
 

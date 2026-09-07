@@ -122,7 +122,8 @@ runtime 读到一条后：从 `gakumas-mod/gmi_shaders.bundle` 取 `Gmi/Transpar
   `GmiBakedReflection` pass 在镜面里补画一笔；
 - 光照读角色灯表 `ShaderVariablesActorLighting`（按 `_ActorIndex` 掩码选灯）和场景全局的
   阴影色 / `_RampMap`，随场景灯光变化；
-- 没有全局开关：有材质声明就画，没有就什么都不做。渲染器出现后最多约 60 帧才被扫到。
+- 没有全局开关：有材质声明就画，没有就什么都不做。角色 rig 注册时立即登记渲染器，蒙皮数据
+  自洽后约 3 帧开始画，与衣服其余部分基本同时出现。
 
 不声明这个键就是旧的前向透明路径，已知在景深阶段没有深度附件、会穿透身体，**不要再用**。
 
