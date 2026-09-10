@@ -60,7 +60,8 @@ jobs:
           # 更新说明取 annotated tag 的注解正文（首行主题，空行后是面向用户的 "- " 变动列表，
           # 与 gakumas-modding 同一套写法），末尾固定指向 CHANGELOG；tag 没写注解才退回
           # CHANGELOG 里本版那一节。
-          git fetch --force origin "refs/tags/$env:RELEASE_TAG:refs/tags/$env:RELEASE_TAG"
+          # 冒号紧跟变量名会被 pwsh 当作用域分隔符（$env:RELEASE_TAG:refs → 空），必须用 ${env:...}
+          git fetch --force origin "refs/tags/${env:RELEASE_TAG}:refs/tags/${env:RELEASE_TAG}"
           $body = (git tag -l --format='%(contents:body)' $env:RELEASE_TAG | Out-String).Trim()
           $bullets = ($body -split "`r?`n" | Where-Object { $_ -match '^\s*- ' } | ForEach-Object { $_.Trim() }) -join "`n"
           if ($bullets) {
