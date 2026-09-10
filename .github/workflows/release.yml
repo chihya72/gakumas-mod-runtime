@@ -17,6 +17,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Package
         id: package
@@ -55,12 +57,21 @@ jobs:
 
           已经装过的直接覆盖 `xinput1_3.dll` 即可。
           '@
-          # 更新说明直接取 CHANGELOG 里本版那一节；取不到就只发安装说明
-          $version = $env:RELEASE_TAG -replace '^v', ''
-          $changelog = Get-Content -Raw -Encoding utf8 'CHANGELOG.md'
-          $pattern = '(?ms)^## ' + [regex]::Escape($version) + '\b.*?(?=^## |\z)'
-          $section = [regex]::Match($changelog, $pattern).Value.Trim()
-          $notes = if ($section) { "$install`n`n$section" } else { $install }
+          # 更新说明取 annotated tag 的注解正文（首行主题，空行后是面向用户的 "- " 变动列表，
+          # 与 gakumas-modding 同一套写法），末尾固定指向 CHANGELOG；tag 没写注解才退回
+          # CHANGELOG 里本版那一节。
+          git fetch --force origin "refs/tags/$env:RELEASE_TAG:refs/tags/$env:RELEASE_TAG"
+          $body = (git tag -l --format='%(contents:body)' $env:RELEASE_TAG | Out-String).Trim()
+          $bullets = ($body -split "`r?`n" | Where-Object { $_ -match '^\s*- ' } | ForEach-Object { $_.Trim() }) -join "`n"
+          if ($bullets) {
+            $notes = "$install`n`n$bullets`n`n完整条目见 [CHANGELOG.md](https://github.com/$env:GITHUB_REPOSITORY/blob/$env:RELEASE_TAG/CHANGELOG.md)。"
+          } else {
+            $version = $env:RELEASE_TAG -replace '^v', ''
+            $changelog = Get-Content -Raw -Encoding utf8 'CHANGELOG.md'
+            $pattern = '(?ms)^## ' + [regex]::Escape($version) + '\b.*?(?=^## |\z)'
+            $section = [regex]::Match($changelog, $pattern).Value.Trim()
+            $notes = if ($section) { "$install`n`n$section" } else { $install }
+          }
           $notesPath = Join-Path $env:RUNNER_TEMP 'gakumas-mod-runtime-release.md'
           [System.IO.File]::WriteAllText($notesPath, $notes, [System.Text.UTF8Encoding]::new($false))
 
