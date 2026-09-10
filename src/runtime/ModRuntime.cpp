@@ -146,6 +146,10 @@ namespace GakumasMod::Runtime {
             std::string rendererId;
             std::string targetRenderer;
             std::string modRenderer;
+            // renderers[].skeleton：这个渲染器自己的骨架 sidecar。发型 + 发饰同包时两个
+            // renderer 的骨数不同（hume-base-0000 是 83 / 80），只读顶层 skeleton 会让发饰
+            // 撞上 "sidecar count mismatch" 而整段跳过。空 = 沿用顶层 skeleton。
+            std::string skeletonAssetName;
         };
 
         struct LocalModAssetReplacement {
@@ -180,6 +184,7 @@ namespace GakumasMod::Runtime {
             void* modRenderer{};
             size_t originalIndex{};
             size_t modIndex{};
+            std::string skeletonAssetName;   // 来自 renderers[].skeleton；空 = 顶层 skeleton
         };
 
         struct PersistentMaterialTextureOverride {
@@ -1781,6 +1786,7 @@ namespace GakumasMod::Runtime {
                             GetJsonString(rendererItem, "rendererId").value_or(""),
                             *targetRenderer,
                             *modRenderer,
+                            GetFirstJsonString(rendererItem, { "skeleton", "skeletonAsset" }).value_or(""),
                         });
                     }
                 }
@@ -4594,10 +4600,11 @@ namespace GakumasMod::Runtime {
             std::unordered_set<size_t> usedOriginalIndices;
             std::unordered_set<size_t> usedModIndices;
 
-            const auto addPair = [&](const size_t originalIndex, const size_t modIndex) {
+            const auto addPair = [&](const size_t originalIndex, const size_t modIndex,
+                                     const std::string& skeletonAssetName = std::string{}) {
                 if (originalIndex >= originalRenderers.size() || modIndex >= modRenderers.size()) return;
                 if (usedOriginalIndices.contains(originalIndex) || usedModIndices.contains(modIndex)) return;
-                pairs.emplace_back(LocalModRendererPair{ originalRenderers[originalIndex], modRenderers[modIndex], originalIndex, modIndex });
+                pairs.emplace_back(LocalModRendererPair{ originalRenderers[originalIndex], modRenderers[modIndex], originalIndex, modIndex, skeletonAssetName });
                 usedOriginalIndices.emplace(originalIndex);
                 usedModIndices.emplace(modIndex);
             };
@@ -4623,7 +4630,7 @@ namespace GakumasMod::Runtime {
                             GetUnityObjectNameString(modRenderers[0]).c_str());
                     }
                     if (originalIndex && modIndex) {
-                        addPair(*originalIndex, *modIndex);
+                        addPair(*originalIndex, *modIndex, rule.skeletonAssetName);
                         continue;
                     }
 
@@ -6115,9 +6122,17 @@ namespace GakumasMod::Runtime {
                     const auto transformOk = clonedModMesh
                         && TransformModMeshVerticesToOriginalRendererSpace(pair.originalRenderer, pair.modRenderer,
                             clonedModMesh, sourceName, pair.originalIndex);
+                    // 发型 + 发饰同包：每个 renderer 的骨架 sidecar 是各自那份（renderers[].skeleton），
+                    // 顶层 skeleton 只是主 renderer 的。以前一律读顶层，发饰按发型的骨数校验必炸。
+                    auto rendererReplacement = replacement;
+                    if (!pair.skeletonAssetName.empty() && pair.skeletonAssetName != replacement.skeletonAssetName) {
+                        rendererReplacement.skeletonAssetName = pair.skeletonAssetName;
+                        Log::InfoFmt("[ModAsset] Renderer uses its own skeleton sidecar: %s renderer=%zu asset=%s",
+                            sourceName.c_str(), pair.originalIndex, pair.skeletonAssetName.c_str());
+                    }
                     const auto skinningOk = transformOk
                         && PatchModMeshSkinningToOriginalOrder(pair.originalRenderer, pair.modRenderer, originalMesh,
-                            clonedModMesh, replacement, sourceName, pair.originalIndex);
+                            clonedModMesh, rendererReplacement, sourceName, pair.originalIndex);
 
                     if (transformOk && skinningOk) {
                         SkinnedMeshRenderer_set_sharedMesh(pair.originalRenderer, clonedModMesh);

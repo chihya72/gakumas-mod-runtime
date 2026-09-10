@@ -64,7 +64,7 @@ gakumas-mod/mods/<mod-id>/mod.json
 | `bundle` | 相对当前 Mod 目录的 AssetBundle 路径 |
 | `asset` | bundle 内资源路径 |
 | `type` | 当前主路径为 `GameObject` |
-| `renderers` | 原 renderer 与 Mod renderer 的明确配对 |
+| `renderers` | 原 renderer 与 Mod renderer 的明确配对。每项可带自己的 `skeleton`（该 renderer 的骨架 sidecar，1.2.1 起生效；发型 + 发饰同包时两份骨数不同，发饰必须用自己那份），不带则沿用顶层 `skeleton` |
 | `replaceMaterials` | 是否直接替换材质；通常保持 `false` 并使用贴图规则 |
 | `textures` | renderer、材质槽、shader property 与 Texture2D 资源的映射 |
 | `skeleton` | 可选。bundle 内骨架 sidecar（`TextAsset`）的资源路径；声明后 runtime 按 sidecar 建真实骨链，不再走旧的按名 remap 分支。兼容旧别名 `skeletonAsset` |

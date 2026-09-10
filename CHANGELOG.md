@@ -1,5 +1,14 @@
 # Gakumas Mod Runtime 更新日志
 
+## 1.2.1 — renderers[].skeleton 按渲染器生效（2026-09-10）
+
+- 以前只读 replacement 顶层的 `skeleton`，`renderers[]` 里各项的 `skeleton` 字段被忽略。发型 + 发饰
+  同包时两个 renderer 的骨数经常不同（`hume-base-0000_hair` 是 83 / 80），发饰按发型 sidecar 校验就报
+  `Lossless IP skeleton sidecar count mismatch`，整段网格替换被跳过、原版发饰披着新贴图留在头上。
+  之前 `hski-miku-hair` 能过只是碰巧两份都是 74 根。现在每个 renderer 用自己那份 sidecar，
+  没写就沿用顶层；换用时打一条 `Renderer uses its own skeleton sidecar`。
+- 插件 1.8.x 导出的 mod.json 一直在写这个字段，不用重导。
+
 ## 1.2.0 — 烘焙半透明（2026-09-07 实机定案）
 
 - **半透明材质段正式走烘焙路线**：`transparentMaterials[].props._GmiBakedAfterDof = 1` 的材质，
